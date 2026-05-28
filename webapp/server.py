@@ -23,7 +23,10 @@ from quantbot import config, live
 from quantbot.intraday_data import load_session, now_market
 from quantbot.intraday_engine import run_intraday
 from quantbot.intraday_metrics import to_payload
-from quantbot.report import market_report, report_to_csv, report_to_jsonl
+from quantbot.report import (
+    bulk_reports, market_report, ranking_report,
+    report_to_csv, report_to_jsonl, reports_to_flat_csv, reports_to_jsonl,
+)
 from quantbot.strategies_intraday import default_bots
 
 app = Flask(__name__)
@@ -167,6 +170,70 @@ def api_report():
         return Response(report_to_csv(rep), mimetype="text/csv",
                         headers={"Content-Disposition": f"attachment; filename={base}.csv"})
     return jsonify(rep)
+
+
+def _markets_param() -> list[str]:
+    """markets=kr,us 형태(콤마구분) 또는 단일 market= 파라미터를 리스트로."""
+    raw = request.args.get("markets") or request.args.get("market") or config.DEFAULT_MARKET
+    out = [m.strip() for m in raw.split(",") if m.strip() in config.MARKETS]
+    return out or [config.DEFAULT_MARKET]
+
+
+def _days_param(default: int = 30) -> int:
+    try:
+        d = int(request.args.get("days", default))
+    except (TypeError, ValueError):
+        d = default
+    return max(2, min(d, 30))            # yfinance 1분봉 한계 ~30일
+
+
+@app.route("/api/ranking")
+def api_ranking():
+    """전일 기준 N일간 완료 세션들로 봇 종합 랭킹(평균 순위·수익률)."""
+    markets = _markets_param()
+    days = _days_param()
+    ts = dt.datetime.now().strftime("%H:%M:%S")
+    with _lock:
+        try:
+            rep = ranking_report(markets, days=days)
+            print(f"[{ts}] 랭킹 {markets} {days}일 → {rep['meta']['n_sessions']}세션", flush=True)
+            return jsonify(rep)
+        except Exception as e:                       # noqa: BLE001
+            traceback.print_exc()
+            return jsonify({"error": f"랭킹 생성 중 오류: {e}", "status": "exception"})
+
+
+@app.route("/api/bulk_report")
+def api_bulk_report():
+    """여러 시장 × 여러 날 보고서를 한 번에. format=jsonl(기본 다운로드)|csv|json."""
+    markets = _markets_param()
+    days = _days_param()
+    fmt = request.args.get("format", "jsonl")
+    bot = request.args.get("bot")                     # 특정 봇만 추출(없으면 전체)
+    ts = dt.datetime.now().strftime("%H:%M:%S")
+    with _lock:
+        try:
+            reports = bulk_reports(markets, days=days)
+            if bot:                                   # 봇 1개만 남기고 빈 세션 제거
+                reports = [{**r, "bots": [b for b in r.get("bots", []) if b.get("name") == bot]}
+                           for r in reports]
+                reports = [r for r in reports if r["bots"]]
+            n_lines = sum(len(r.get("bots", [])) for r in reports)
+            print(f"[{ts}] 대량추출 {markets} {days}일 bot={bot or '전체'} → {len(reports)}세션 {n_lines}행",
+                  flush=True)
+            base = f"bulk_{'-'.join(markets)}_{days}d" + (f"_{bot}" if bot else "")
+            if fmt == "csv":
+                return Response(reports_to_flat_csv(reports), mimetype="text/csv",
+                                headers={"Content-Disposition": f"attachment; filename={base}.csv"})
+            if fmt == "json":
+                return jsonify({"meta": {"markets": markets, "days": days,
+                                         "n_sessions": len(reports), "n_rows": n_lines},
+                                "reports": reports})
+            return Response(reports_to_jsonl(reports), mimetype="application/x-ndjson",
+                            headers={"Content-Disposition": f"attachment; filename={base}.jsonl"})
+        except Exception as e:                       # noqa: BLE001
+            traceback.print_exc()
+            return jsonify({"error": f"대량 추출 중 오류: {e}", "status": "exception"})
 
 
 def main():

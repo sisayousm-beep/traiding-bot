@@ -97,7 +97,7 @@
     <span id="livectl">
       <span id="autostat" class="off">⚪ 자동 OFF</span>
       <label><input type="checkbox" id="auto" checked> 자동</label>
-      <select id="interval"><option value="5">5초</option><option value="10" selected>10초</option><option value="15">15초</option><option value="30">30초</option><option value="60">60초</option></select>
+      <select id="interval"><option value="5">5초</option><option value="10" selected>10초</option><option value="15">15초</option><option value="30">30초</option><option value="60">60초</option><option value="240">4분</option></select>
     </span>
     <span id="tlctl" class="tlctl">
       <button class="act" id="tlplay">▶ 재생</button>
@@ -107,6 +107,7 @@
       <span id="tlstat" class="meta"></span>
     </span>
     <button class="act" id="report">📄 보고서</button>
+    <button class="act" id="ranking">🏆 종합랭킹</button>
     <button class="act" id="refresh">갱신</button>
   </div>
 </header>
@@ -136,6 +137,36 @@
       <button class="act" id="repClose">닫기 ✕</button>
     </div>
     <div id="repBody" class="modal-body"></div>
+  </div>
+</div>
+
+<div id="rankModal" class="modal">
+  <div class="modal-box">
+    <div class="modal-head">
+      <h2 id="rankTitle">🏆 봇 종합 랭킹 &amp; AI 학습용 대량 추출</h2>
+      <span class="grow"></span>
+      <button class="act" id="rankClose">닫기 ✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="repcard">
+        <h3>설정 <span class="meta">(전일 기준 · yfinance 1분봉 최대 ~30일)</span></h3>
+        <div style="display:flex;gap:18px;flex-wrap:wrap;align-items:center;">
+          <div>
+            <div class="meta" style="margin-bottom:5px;">시장 (여러 개 선택 가능)</div>
+            <label style="display:inline-flex;gap:4px;"><input type="checkbox" class="rmkt" value="kr" checked> 국장</label>
+            <label style="display:inline-flex;gap:4px;"><input type="checkbox" class="rmkt" value="us"> 미장</label>
+            <label style="display:inline-flex;gap:4px;"><input type="checkbox" class="rmkt" value="kr_hot"> 국장🔥</label>
+            <label style="display:inline-flex;gap:4px;"><input type="checkbox" class="rmkt" value="us_hot"> 미장🔥</label>
+          </div>
+          <label>기간(일) <input type="number" id="rankDays" value="30" min="2" max="30" style="width:64px;background:var(--panel);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:5px;"></label>
+          <button class="act" id="rankRun">🏆 랭킹 계산</button>
+          <a class="act" id="bulkJsonl" href="#" title="여러 날×여러 시장 봇 리포트를 한 파일로 (세션×봇 1줄)">⬇ 대량 JSONL</a>
+          <a class="act" id="bulkCsv" href="#">⬇ 대량 CSV</a>
+        </div>
+        <div class="meta" style="margin-top:8px;">※ 랭킹은 세션마다 봇끼리의 순위(1~N)와 하루수익률을 모아 <b>평균</b>냅니다. 평균 순위가 낮을수록(=항상 상위권) 좋은 봇. 시장을 여러 개 고르면 그 시장들의 모든 거래일을 합쳐 평균냅니다.</div>
+      </div>
+      <div id="rankBody"></div>
+    </div>
   </div>
 </div>
 
@@ -387,13 +418,14 @@ document.getElementById('tlspeed').onchange=()=>{};
 // ---- 자동 갱신: setTimeout 자기-예약 루프(요청 중첩 방지 + 예외 시에도 계속) ----
 const autoOn=()=>document.getElementById('auto').checked;
 const intervalSec=()=>+document.getElementById('interval').value;
+const intervalLabel=()=>{const s=intervalSec();return s>=60?(s/60)+'분':s+'초';};
 function autoLog(msg){console.log(`[자동갱신 ${new Date().toLocaleTimeString()}] ${msg}`);}
 function setAutoStat(text,on){const el=document.getElementById('autostat');
   el.textContent=text; el.className=on?'on':'off';}
 function updateCountdown(){
   if(!autoOn())return;
   const left=Math.max(0,Math.ceil((nextRefreshAt-Date.now())/1000));
-  setAutoStat(`🟢 자동 ON · ${intervalSec()}초 주기 · 다음 갱신 ${left}초`,true);
+  setAutoStat(`🟢 자동 ON · ${intervalLabel()} 주기 · 다음 갱신 ${left}초`,true);
 }
 function scheduleNext(){
   if(!autoOn())return;
@@ -422,7 +454,7 @@ function setupAuto(){
   if(autoTimer){clearTimeout(autoTimer);autoTimer=null;}
   if(countdownTimer){clearInterval(countdownTimer);countdownTimer=null;}
   if(autoOn()){
-    autoLog(`자동 갱신 켜짐 · 주기 ${intervalSec()}초`);
+    autoLog(`자동 갱신 켜짐 · 주기 ${intervalLabel()}`);
     countdownTimer=setInterval(updateCountdown,1000);
     scheduleNext();
   }else{
@@ -512,6 +544,67 @@ async function openReport(){
 document.getElementById('report').onclick=openReport;
 document.getElementById('repClose').onclick=()=>document.getElementById('reportModal').classList.remove('show');
 document.getElementById('reportModal').onclick=e=>{if(e.target.id==='reportModal')e.target.classList.remove('show');};
+
+// ===== 🏆 봇 종합 랭킹 + 대량 추출 모달 =====
+function rankMarkets(){return [...document.querySelectorAll('.rmkt:checked')].map(c=>c.value);}
+function rankDays(){return Math.max(2,Math.min(30,+document.getElementById('rankDays').value||30));}
+function rankQuery(){return `markets=${rankMarkets().join(',')||'kr'}&days=${rankDays()}`;}
+function syncBulkLinks(){
+  const q=rankQuery();
+  document.getElementById('bulkJsonl').href=`/api/bulk_report?${q}&format=jsonl`;
+  document.getElementById('bulkCsv').href=`/api/bulk_report?${q}&format=csv`;
+}
+function rankTable(rep){
+  const sd=v=>v==null?'–':(v>=0?'+':'')+pct(v);
+  const num=(v,d=2)=>v==null?'–':(+v).toFixed(d);
+  const sess=rep.sessions||[];
+  const head=`<div class="meta" style="margin-bottom:8px;">
+    대상 ${rep.meta.market_labels.join(', ')} · ${rep.meta.n_sessions}개 세션
+    (${rep.meta.date_from||'?'} ~ ${rep.meta.date_to||'?'})</div>`;
+  if(!rep.bots||!rep.bots.length) return head+'<div class="err">집계할 완료 세션이 없습니다. 기간을 늘리거나 다른 시장을 선택하세요.</div>';
+  const q=rankQuery();
+  const rows=rep.bots.map(b=>{
+    const medal=['🥇','🥈','🥉'][b.overall_rank-1]||('#'+b.overall_rank);
+    const lv=b.leverage>1?` <span class="lev">${b.leverage}x</span>`:'';
+    const bq=`${q}&bot=${encodeURIComponent(b.name)}`;
+    return `<tr>
+      <td>${medal}</td>
+      <td class="l">${b.name}${lv}<br><span class="meta">${b.tagline||''}</span></td>
+      <td><b>${num(b.avg_rank)}</b></td>
+      <td class="${sgn(b.avg_return)}">${sd(b.avg_return)}</td>
+      <td class="${sgn(b.avg_alpha)}">${sd(b.avg_alpha)}</td>
+      <td class="${sgn(b.best_return)}">${sd(b.best_return)}</td>
+      <td class="${sgn(b.worst_return)}">${sd(b.worst_return)}</td>
+      <td>${b.win_rate_vs_market==null?'–':pct(b.win_rate_vs_market)}</td>
+      <td>${b.bankrupt_count||0}</td>
+      <td>${b.n_sessions}</td>
+      <td class="l"><a href="/api/bulk_report?${bq}&format=jsonl" title="${b.name} 종합 JSONL 다운로드">⬇J</a>
+        <a href="/api/bulk_report?${bq}&format=csv" title="${b.name} 종합 CSV 다운로드" style="margin-left:6px;">⬇C</a></td></tr>`;
+  }).join('');
+  return head+`<div class="repcard"><table>
+    <thead><tr><th>종합</th><th class="l">봇</th><th>평균순위</th><th>평균수익</th>
+      <th>평균알파</th><th>최고일</th><th>최악일</th><th>시장초과율</th><th>청산</th><th>세션수</th><th class="l">봇별</th></tr></thead>
+    <tbody>${rows}</tbody></table>
+    <div class="meta" style="margin-top:7px;">평균순위=세션별 등수의 평균(낮을수록 항상 상위) · 시장초과율=시장(등가중 매수보유) 이긴 날 비율</div></div>`;
+}
+async function runRanking(){
+  const body=document.getElementById('rankBody');
+  if(!rankMarkets().length){body.innerHTML='<div class="err">시장을 하나 이상 선택하세요.</div>';return;}
+  body.innerHTML='<div class="meta"><span class="spin"></span> 여러 날 세션 수신·시뮬레이션 중… (수십 초 걸릴 수 있어요)</div>';
+  try{
+    const r=await fetch(`/api/ranking?${rankQuery()}`);
+    const rep=await r.json();
+    if(rep.error){body.innerHTML=`<div class="err">⚠️ ${rep.error}</div>`;return;}
+    body.innerHTML=rankTable(rep);
+  }catch(e){body.innerHTML=`<div class="err">오류: ${e}</div>`;}
+}
+document.getElementById('ranking').onclick=()=>{
+  document.getElementById('rankModal').classList.add('show'); syncBulkLinks();};
+document.getElementById('rankRun').onclick=runRanking;
+document.querySelectorAll('.rmkt').forEach(c=>c.onchange=syncBulkLinks);
+document.getElementById('rankDays').onchange=syncBulkLinks;
+document.getElementById('rankClose').onclick=()=>document.getElementById('rankModal').classList.remove('show');
+document.getElementById('rankModal').onclick=e=>{if(e.target.id==='rankModal')e.target.classList.remove('show');};
 
 load(false); setupAuto();
 </script>

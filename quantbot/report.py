@@ -309,3 +309,175 @@ def report_to_jsonl(report: dict) -> str:
         }
         lines.append(json.dumps(rec, ensure_ascii=False))
     return "\n".join(lines) + ("\n" if lines else "")
+
+
+# ===== 여러 날 × 여러 시장: 대량 추출 + 봇 종합 랭킹 =====
+
+def session_reports(market: str, days: int = 30, include_today: bool = False,
+                    capital: float | None = None) -> list[dict]:
+    """최근 days 일간(달력) 완료 세션마다 market_report를 만들어 리스트로 돌려준다.
+
+    '전일 기준'이 기본이라 오늘(진행 중) 세션은 include_today=False로 제외한다.
+    yfinance 1분봉 한계 안에서 받을 수 있는 모든 거래일이 대상이다(보통 20~22거래일).
+    """
+    from .intraday_data import load_sessions, now_market
+    from .intraday_engine import run_intraday
+    from .strategies_intraday import default_bots
+
+    m = config.MARKETS[market]
+    cap = m["capital"] if capital is None else capital
+    today = now_market(market).date()
+
+    reports = []
+    for d, c, v in load_sessions(market, days=days):
+        if not include_today and d >= today:
+            continue
+        res = run_intraday(default_bots(), c, v, cap, flatten_eod=True)
+        view = {"k": len(c), "total": len(c), "kind": "backtest",
+                "label": f"{d} — 완료 세션"}
+        rep = market_report(res, market, "prev", d, cap, view, closes=c, volumes=v)
+        reports.append(rep)
+    return reports
+
+
+def bulk_reports(markets, days: int = 30, include_today: bool = False) -> list[dict]:
+    """여러 시장 × 여러 날의 세션 리포트를 한 리스트로 모은다(대량 추출용)."""
+    if isinstance(markets, str):
+        markets = [markets]
+    out = []
+    for market in markets:
+        if market not in config.MARKETS:
+            continue
+        out.extend(session_reports(market, days=days, include_today=include_today))
+    return out
+
+
+def reports_to_jsonl(reports: list[dict]) -> str:
+    """여러 세션 리포트를 하나의 JSONL로 이어붙인다(AI 학습용 대량 파일)."""
+    return "".join(report_to_jsonl(r) for r in reports)
+
+
+# 대량 CSV(평탄): 세션·시장 맥락 + 봇 핵심 지표를 한 행씩.
+_BULK_COLS = [
+    ("session_date", "세션날짜"), ("market", "시장"), ("regime", "장국면"),
+    ("market_return", "시장수익률"),
+    ("rank", "순위"), ("name", "봇"), ("tagline", "전략"),
+    ("daily_return", "하루수익률"), ("alpha", "시장대비알파"), ("beat_market", "시장초과"),
+    ("realized_return", "매도실현수익률"), ("realized_pnl", "매도실현손익"),
+    ("win_rate", "승률"), ("profit_factor", "손익비"), ("expectancy", "기대값"),
+    ("n_trades", "총매매"), ("n_round_trips", "라운드트립"),
+    ("peak_gain", "고점"), ("max_drawdown", "최대낙폭"),
+    ("final_equity", "최종자산"), ("bankrupt", "청산여부"),
+]
+
+
+def reports_to_flat_csv(reports: list[dict]) -> str:
+    """여러 세션 리포트를 (세션×봇) 한 행씩의 평탄 CSV로. Excel용 BOM 포함."""
+    buf = io.StringIO()
+    buf.write("﻿")
+    w = csv.writer(buf)
+    w.writerow([h for _, h in _BULK_COLS])
+    for rep in reports:
+        meta = rep.get("meta", {})
+        me = rep.get("market", {})
+        for b in rep.get("bots", []):
+            row = []
+            for k, _ in _BULK_COLS:
+                if k == "session_date":
+                    row.append(meta.get("session_date"))
+                elif k == "market":
+                    row.append(meta.get("market"))
+                elif k == "regime":
+                    row.append(me.get("regime_label"))
+                elif k == "market_return":
+                    row.append(me.get("market_return"))
+                else:
+                    row.append(b.get(k))
+            w.writerow(row)
+    return buf.getvalue()
+
+
+def rank_bots(reports: list[dict]) -> list[dict]:
+    """여러 세션 리포트에서 봇별 평균 순위·수익률을 집계해 '종합 등수'를 매긴다.
+
+    종합 등수 기준: 평균 순위가 낮을수록(=좋을수록) 우선, 동률이면 평균 수익률이
+    높은 순. 순위는 세션 안에서 봇끼리 비교(1..N)라 시장이 달라도 비교 가능하고,
+    수익률·알파는 % 라 통화가 달라도 평균낼 수 있다.
+    """
+    agg: dict[str, dict] = {}
+    for rep in reports:
+        for b in rep.get("bots", []):
+            name = b.get("name")
+            d = agg.setdefault(name, {
+                "name": name, "tagline": b.get("tagline"), "leverage": b.get("leverage"),
+                "ranks": [], "returns": [], "alphas": [],
+                "beats": 0, "beat_n": 0, "bankrupts": 0, "n": 0,
+            })
+            d["n"] += 1
+            if b.get("rank") is not None:
+                d["ranks"].append(b["rank"])
+            if b.get("daily_return") is not None:
+                d["returns"].append(b["daily_return"])
+            if b.get("alpha") is not None:
+                d["alphas"].append(b["alpha"])
+            if b.get("beat_market") is not None:
+                d["beat_n"] += 1
+                d["beats"] += 1 if b["beat_market"] else 0
+            if b.get("bankrupt"):
+                d["bankrupts"] += 1
+
+    def avg(xs):
+        return (sum(xs) / len(xs)) if xs else None
+
+    out = []
+    for d in agg.values():
+        out.append({
+            "name": d["name"], "tagline": d["tagline"], "leverage": _clean(d["leverage"]),
+            "n_sessions": d["n"],
+            "avg_rank": _clean(avg(d["ranks"])),
+            "avg_return": _clean(avg(d["returns"])),
+            "avg_alpha": _clean(avg(d["alphas"])),
+            "best_return": _clean(max(d["returns"])) if d["returns"] else None,
+            "worst_return": _clean(min(d["returns"])) if d["returns"] else None,
+            "win_rate_vs_market": _clean(d["beats"] / d["beat_n"]) if d["beat_n"] else None,
+            "bankrupt_count": d["bankrupts"],
+        })
+    out.sort(key=lambda d: (d["avg_rank"] is None,
+                            d["avg_rank"] if d["avg_rank"] is not None else 9e9,
+                            -(d["avg_return"] if d["avg_return"] is not None else -9e9)))
+    for i, d in enumerate(out):
+        d["overall_rank"] = i + 1
+    return out
+
+
+def ranking_report(markets, days: int = 30) -> dict:
+    """전일 기준 days일간 완료 세션들로 봇 종합 랭킹을 만든다.
+
+    markets가 여러 개면 그 시장들의 모든 세션을 합쳐 평균낸다(어느 봇이
+    시장을 가리지 않고 평균적으로 잘하는지). 단일 시장이면 그 시장만.
+    """
+    if isinstance(markets, str):
+        markets = [markets]
+    markets = [m for m in markets if m in config.MARKETS]
+    reports = bulk_reports(markets, days=days)
+    bots = rank_bots(reports)
+
+    sessions = [{
+        "session_date": r["meta"].get("session_date"),
+        "market": r["meta"].get("market"),
+        "regime": r.get("market", {}).get("regime_label"),
+        "market_return": r.get("market", {}).get("market_return"),
+    } for r in reports]
+    sessions.sort(key=lambda s: (str(s["session_date"]), str(s["market"])))
+
+    labels = [config.MARKETS[m]["short"] for m in markets]
+    return {
+        "meta": {
+            "markets": markets, "market_labels": labels,
+            "days": days, "n_sessions": len(reports),
+            "date_from": sessions[0]["session_date"] if sessions else None,
+            "date_to": sessions[-1]["session_date"] if sessions else None,
+        },
+        "bots": bots,
+        "sessions": sessions,
+    }
