@@ -12,12 +12,20 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import os
+import sys
 import time
+
+try:                                  # Windows 한글 콘솔(cp949)에서 이모지/em대시 출력 보장
+    sys.stdout.reconfigure(encoding="utf-8")
+except Exception:
+    pass
 
 from quantbot import config, live
 from quantbot.intraday_data import load_session, market_status
 from quantbot.intraday_engine import run_intraday
 from quantbot.intraday_metrics import leaderboard
+from quantbot.report import market_report, report_to_csv
 from quantbot.strategies_intraday import default_bots
 
 
@@ -47,15 +55,58 @@ def run_once(market: str, mode: str) -> None:
               f"{r['tagline']}{bust}")
 
 
+def run_report(market: str, mode: str) -> None:
+    m = config.MARKETS[market]
+    print(f"[{dt.datetime.now():%H:%M:%S}] {m['short']}/{mode} — 결과 보고서 생성…")
+    c, v, sess, status, is_today = load_session(market, mode)
+    if status != "ok":
+        print(f"  데이터 없음({status}).")
+        return
+    vw = live.view(market, mode, c, sess, is_today)
+    c = c.iloc[:vw["k"]]; v = v.iloc[:vw["k"]]
+    res = run_intraday(default_bots(), c, v, m["capital"], flatten_eod=vw["flatten"])
+    rep = market_report(res, market, mode, sess, m["capital"], vw)
+    cur = m["currency"]
+    print(f"\n  ===== {m['label']} / {mode} / 세션 {sess} — 봇별 결과 보고서 =====")
+    for b in rep["bots"]:
+        print(f"\n  #{b['rank']} {b['name']}  ({b['tagline']})")
+        print(f"    하루수익 {(_p(b['daily_return']))}  매도실현 {(_p(b['realized_return']))} "
+              f"({_money(b['realized_pnl'] or 0, cur)})  최종 {_money(b['final_equity'] or 0, cur)}")
+        print(f"    고점 {_p(b['peak_gain'])}  최대낙폭 {_p(b['max_drawdown'])}  분변동성 {_p(b['intraday_vol'])}")
+        print(f"    매매 {b['n_trades']}회(라운드트립 {b['n_round_trips']})  승률 {_p(b['win_rate'])}  "
+              f"손익비 {_n(b['profit_factor'])}  기대값 {_money(b['expectancy'] or 0, cur)}")
+        print(f"    평균보유 {_n(b['avg_hold_min'],0)}분  회전율 {_n(b['turnover'])}  총수수료 {_money(b['total_commission'] or 0, cur)}")
+        if b["best_trade"]:
+            bt = b["best_trade"]; wt = b["worst_trade"]
+            print(f"    최고매매 {bt['name']} {_money(bt['pnl'] or 0, cur)} ({_p(bt['ret'])})  "
+                  f"최악매매 {wt['name']} {_money(wt['pnl'] or 0, cur)} ({_p(wt['ret'])})")
+    os.makedirs(config.RESULTS_DIR, exist_ok=True)
+    path = os.path.join(config.RESULTS_DIR, f"report_{market}_{mode}_{sess}.csv")
+    with open(path, "w", encoding="utf-8-sig", newline="") as f:
+        f.write(report_to_csv(rep))
+    print(f"\n  CSV 저장: {path}")
+
+
+def _p(v) -> str:
+    return "–" if v is None else f"{v*100:+.2f}%"
+
+
+def _n(v, d: int = 2) -> str:
+    return "–" if v is None else f"{v:.{d}f}"
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="당일 단타 봇 경쟁 (국장/미장)")
-    ap.add_argument("--market", choices=["us", "kr"], default="kr")
+    ap.add_argument("--market", choices=["us", "kr", "us_hot", "kr_hot"], default="kr")
     ap.add_argument("--mode", choices=["prev", "today"], default="today")
     ap.add_argument("--live", action="store_true", help="반복 갱신(실시간/리플레이)")
+    ap.add_argument("--report", action="store_true", help="봇별 결과 보고서 출력 + CSV 저장")
     ap.add_argument("--interval", type=int, default=30)
     args = ap.parse_args()
 
-    if args.live:
+    if args.report:
+        run_report(args.market, args.mode)
+    elif args.live:
         print(f"실시간 모드({args.market}/{args.mode}). Ctrl+C로 종료.")
         try:
             while True:

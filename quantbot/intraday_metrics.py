@@ -55,18 +55,46 @@ def leaderboard(results: list[IntradayResult], initial: float) -> list[dict]:
     return rows
 
 
-def _trades_payload(pf, open_px: pd.Series) -> list[dict]:
+def _trades_payload(pf) -> tuple[list[dict], float]:
+    """매매 기록 + 매도별 실현손익.
+
+    평균단가(이동평균) 회계로 매수원가(매수 수수료 포함)를 쌓고,
+    매도 시 (매도대금 - 매도수수료) - 평단가×매도수량 = 실현손익을 계산한다.
+    종가 청산까지 끝나면 매도 실현손익의 합 = 그 봇의 하루 실현손익이 된다.
+    반환: (트레이드 리스트, 실현손익 합계)
+    """
+    pos_sh: dict[str, float] = {}      # 보유수량
+    pos_cost: dict[str, float] = {}    # 보유 매수원가 합(수수료 포함)
+    realized_total = 0.0
     out = []
     for t in pf.trades:
         ts = t.date
         tstr = ts.strftime("%H:%M") if hasattr(ts, "strftime") else str(ts)
         amount = t.shares * t.price
+        realized = realized_pct = None
+        if t.side == "BUY":
+            pos_sh[t.ticker] = pos_sh.get(t.ticker, 0.0) + t.shares
+            pos_cost[t.ticker] = pos_cost.get(t.ticker, 0.0) + amount + t.commission
+        else:  # SELL — 평단가 대비 실현손익
+            sh0 = pos_sh.get(t.ticker, 0.0)
+            cost0 = pos_cost.get(t.ticker, 0.0)
+            if sh0 > 1e-12:
+                cost_removed = cost0 * min(t.shares, sh0) / sh0
+                pos_sh[t.ticker] = sh0 - t.shares
+                pos_cost[t.ticker] = cost0 - cost_removed
+            else:
+                cost_removed = t.shares * t.price
+            proceeds = amount - t.commission
+            realized = proceeds - cost_removed
+            realized_pct = (realized / cost_removed) if cost_removed > 1e-12 else None
+            realized_total += realized
         out.append({
             "time": tstr, "ticker": t.ticker, "name": NAME(t.ticker),
             "side": t.side, "shares": _clean(t.shares), "price": _clean(t.price),
             "amount": _clean(amount), "commission": _clean(t.commission),
+            "realized": _clean(realized), "realized_pct": _clean(realized_pct),
         })
-    return out
+    return out, realized_total
 
 
 def to_payload(results, closes: pd.DataFrame, session_date, market: str,
@@ -75,9 +103,9 @@ def to_payload(results, closes: pd.DataFrame, session_date, market: str,
     times = [ts.strftime("%H:%M") for ts in closes.index]
     open_px = closes.iloc[0]
     last = closes.iloc[-1]
-    board = leaderboard(results, capital)
 
     equity, holdings, taglines, trades = {}, {}, {}, {}
+    realized_by_bot = {}
     held = set()
     for r in results:
         eq = r.equity.reindex(closes.index)
@@ -100,11 +128,21 @@ def to_payload(results, closes: pd.DataFrame, session_date, market: str,
                 "chg_open": _clean(float(px) / float(op) - 1.0) if op and pd.notna(op) else None,
             })
         pos.sort(key=lambda d: -(d["value"] or 0))
+        tlog, realized_total = _trades_payload(pf)
+        realized_by_bot[r.name] = realized_total
         holdings[r.name] = {"total": _clean(total), "cash": _clean(pf.cash),
                             "leverage": _clean(r.leverage),
                             "bankrupt": bool(getattr(pf, "bankrupt", False)),
-                            "positions": pos, "n_trades": len(pf.trades)}
-        trades[r.name] = _trades_payload(pf, open_px)
+                            "positions": pos, "n_trades": len(pf.trades),
+                            "realized": _clean(realized_total),
+                            "realized_pct": _clean(realized_total / capital)}
+        trades[r.name] = tlog
+
+    board = leaderboard(results, capital)
+    for row in board:                       # 매도 실현손익을 순위표에 합류
+        rt = realized_by_bot.get(row["name"])
+        row["RealizedPnL"] = _clean(rt)
+        row["RealizedReturn"] = _clean(rt / capital) if rt is not None else None
 
     # 보유 종목 주가 흐름(시초가 대비 %) — 현재 어느 봇이든 들고 있는 종목들
     held_prices = {}
@@ -121,6 +159,10 @@ def to_payload(results, closes: pd.DataFrame, session_date, market: str,
             "last_price": _clean(last.get(tkr)),
             "holders": holders,
         }
+
+    # 전 종목 분단위 종가(타임랩스 재생 시 클라이언트가 임의 시점 보유·가치를 재구성)
+    prices = {t: [_clean(x) for x in closes[t].tolist()] for t in closes.columns}
+    names = {t: NAME(t) for t in closes.columns}
 
     return {
         "meta": {
@@ -141,4 +183,6 @@ def to_payload(results, closes: pd.DataFrame, session_date, market: str,
         "taglines": taglines,
         "held_prices": held_prices,
         "trades": trades,
+        "prices": prices,
+        "names": names,
     }

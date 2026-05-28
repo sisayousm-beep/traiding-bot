@@ -52,24 +52,57 @@
   .plist .t{color:var(--text);font-weight:600;}
   .plist .c{font-variant-numeric:tabular-nums;}
   #status{font-size:12px;color:var(--muted);}
+  #autostat{font-size:12px;font-weight:600;white-space:nowrap;}
+  #autostat.on{color:var(--green);}
+  #autostat.off{color:var(--muted);}
+  #livectl{display:inline-flex;align-items:center;gap:10px;}
+  .tlctl{display:none;align-items:center;gap:8px;}
+  .tlctl.show{display:inline-flex;}
+  .tlctl button.act{padding:6px 11px;}
+  #tlbar{width:150px;vertical-align:middle;accent-color:var(--gold);}
+  #tlstat{white-space:nowrap;}
   .spin{display:inline-block;width:12px;height:12px;border:2px solid var(--muted);border-top-color:var(--accent);border-radius:50%;animation:s .8s linear infinite;vertical-align:middle;}
   @keyframes s{to{transform:rotate(360deg)}}
   .err{background:#f8514922;border:1px solid var(--red);padding:16px;border-radius:8px;color:#ffa198;line-height:1.6;}
   .buy{color:var(--accent);} .sell{color:var(--gold);}
   .scroll{overflow:auto;max-height:340px;}
   @media(max-width:880px){.grid2{grid-template-columns:1fr;}}
+  .modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:50;padding:30px;overflow:auto;}
+  .modal.show{display:block;}
+  .modal-box{max-width:1100px;margin:0 auto;background:var(--panel);border:1px solid var(--border);border-radius:12px;}
+  .modal-head{display:flex;align-items:center;gap:10px;padding:14px 18px;border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--panel);border-radius:12px 12px 0 0;}
+  .modal-head h2{margin:0;font-size:16px;}
+  .modal-head .grow{flex:1;}
+  .modal-head a.act{text-decoration:none;display:inline-block;}
+  .modal-body{padding:16px 18px;}
+  .repcard{background:#0d1117;border:1px solid var(--border);border-radius:10px;padding:13px;margin-bottom:12px;}
+  .repcard h3{margin:0 0 6px;font-size:15px;}
+  .repgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:6px 14px;font-size:12.5px;}
+  .repgrid div{display:flex;justify-content:space-between;gap:8px;border-bottom:1px solid #21262d;padding:2px 0;}
+  .repgrid .k{color:var(--muted);}
 </style>
 </head>
 <body>
 <header>
   <h1>⚡ 당일 단타 봇 경쟁</h1>
-  <div class="seg mkt" id="mkt"><button data-v="kr" class="on">국장</button><button data-v="us">미장</button></div>
+  <div class="seg mkt" id="mkt"><button data-v="kr" class="on">국장</button><button data-v="us">미장</button><button data-v="kr_hot">국장🔥급등</button><button data-v="us_hot">미장🔥급등</button></div>
   <div class="seg" id="mode"><button data-v="today" class="on">실시간</button><button data-v="prev">전날 장</button></div>
   <div class="meta" id="meta">로딩 중…</div>
   <div class="controls">
     <span id="status"></span>
-    <label><input type="checkbox" id="auto" checked> 자동</label>
-    <select id="interval"><option value="15">15초</option><option value="30" selected>30초</option><option value="60">60초</option></select>
+    <span id="livectl">
+      <span id="autostat" class="off">⚪ 자동 OFF</span>
+      <label><input type="checkbox" id="auto" checked> 자동</label>
+      <select id="interval"><option value="5">5초</option><option value="10" selected>10초</option><option value="15">15초</option><option value="30">30초</option><option value="60">60초</option></select>
+    </span>
+    <span id="tlctl" class="tlctl">
+      <button class="act" id="tlplay">▶ 재생</button>
+      <button class="act" id="tlrewind" title="처음으로">⏮</button>
+      <select id="tlspeed"><option value="1">1x</option><option value="2" selected>2x</option><option value="4">4x</option><option value="8">8x</option></select>
+      <input type="range" id="tlbar" min="2" max="100" value="100">
+      <span id="tlstat" class="meta"></span>
+    </span>
+    <button class="act" id="report">📄 보고서</button>
     <button class="act" id="refresh">갱신</button>
   </div>
 </header>
@@ -89,10 +122,24 @@
   </section>
 </main>
 
+<div id="reportModal" class="modal">
+  <div class="modal-box">
+    <div class="modal-head">
+      <h2 id="repTitle">📄 그날 장 결과 보고서</h2>
+      <span class="grow"></span>
+      <a class="act" id="repCsv" href="#">⬇ CSV 다운로드</a>
+      <button class="act" id="repClose">닫기 ✕</button>
+    </div>
+    <div id="repBody" class="modal-body"></div>
+  </div>
+</div>
+
 <script>
 const COLORS={Atlas:'#58a6ff',Nova:'#3fb950',Orion:'#e3b341',Vega:'#bc8cff','Titan-3X':'#f85149',Sol:'#8b949e'};
 const SCOL=['#58a6ff','#3fb950','#e3b341','#bc8cff','#f85149','#39c5cf','#db61a2','#ff7b72','#a5d6ff','#ffa657','#7ee787','#d2a8ff','#f0883e','#56d4dd'];
-let DATA=null, MARKET='kr', MODE='today', autoTimer=null, TRADEBOT=null;
+let DATA=null, MARKET='kr', MODE='today', autoTimer=null, countdownTimer=null, TRADEBOT=null;
+let AUTO_BUSY=false, nextRefreshAt=0;
+let FULL=null, tlIdx=0, tlTimer=null, tlPlaying=false;  // 타임랩스 상태(클라이언트 재생)
 const MAIN_HTML=document.getElementById('main').innerHTML;
 const col=n=>COLORS[n]||'#58a6ff';
 const cur=()=>(DATA&&DATA.meta&&DATA.meta.currency)||'$';
@@ -120,7 +167,8 @@ function pods(){
     return `<div class="pod" style="border-color:${col(r.name)}55"><div class="r">${medal}</div>
       <div class="nm">${r.name}${lev}${bust}</div>
       <div class="ret ${sgn(r.DailyReturn)}">${r.DailyReturn>=0?'+':''}${pct(r.DailyReturn)}</div>
-      <div class="sub">고점 ${pct(r.PeakGain)} · 낙폭 ${pct(r.MaxDrawdown)}<br>${money(r.FinalEquity)} · ${r.n_trades}회 매매</div></div>`;
+      <div class="sub">고점 ${pct(r.PeakGain)} · 낙폭 ${pct(r.MaxDrawdown)}<br>${money(r.FinalEquity)} · ${r.n_trades}회 매매<br>
+      매도 실현 <b class="${sgn(r.RealizedPnL)}">${r.RealizedPnL>=0?'+':''}${money(r.RealizedPnL)}${r.RealizedReturn!=null?` (${r.RealizedReturn>=0?'+':''}${pct(r.RealizedReturn)})`:''}</b></div></div>`;
   }).join('');
 }
 function eqchart(){
@@ -146,7 +194,7 @@ function base(yt){return{paper_bgcolor:'#161b22',plot_bgcolor:'#161b22',font:{co
 function hline(y,pctMode){return{type:'line',x0:DATA.times[0],x1:DATA.times[DATA.times.length-1],y0:y,y1:y,
   line:{color:'#8b949e',width:1,dash:'dash'}};}
 const COLS=[['rank','#','l'],['name','봇','l'],['DailyReturn','하루수익','s'],['PeakGain','고점','s'],
-  ['MaxDrawdown','최대낙폭','s'],['WinMinutes','상승분',''],['n_trades','매매',''],['FinalEquity','최종자산','']];
+  ['MaxDrawdown','최대낙폭','s'],['RealizedReturn','매도실현','s'],['WinMinutes','상승분',''],['n_trades','매매',''],['FinalEquity','최종자산','']];
 function board(){
   document.querySelector('#board thead').innerHTML='<tr>'+COLS.map(c=>`<th class="${c[2]==='l'?'l':''}">${c[1]}</th>`).join('')+'</tr>';
   document.querySelector('#board tbody').innerHTML=DATA.leaderboard.map(r=>'<tr>'+COLS.map(c=>{
@@ -163,6 +211,7 @@ function holds(){
     return `<div class="hcard"><h3>${r.name}${r.leverage>1?` <span class="lev">${r.leverage}x</span>`:''}</h3>
       <div class="tg">${DATA.taglines[r.name]||''}</div>
       <div>총자산 <b>${money(h.total)}</b> · 현금 ${money(h.cash)}</div>
+      <div class="meta">매도 실현손익 <b class="${sgn(h.realized)}">${h.realized>=0?'+':''}${money(h.realized)}${h.realized_pct!=null?` (${h.realized_pct>=0?'+':''}${pct(h.realized_pct)})`:''}</b></div>
       <div class="plist">${list}</div></div>`;
   }).join('');
 }
@@ -177,13 +226,17 @@ function tradesUI(){
 function renderTrades(){
   const log=(DATA.trades&&DATA.trades[TRADEBOT])||[];
   document.getElementById('tradecount').textContent=`총 ${log.length}건 (최신순)`;
-  document.querySelector('#trades thead').innerHTML='<tr><th class="l">시간</th><th class="l">종목</th><th>구분</th><th>수량</th><th>체결가</th><th>금액</th><th>수수료</th></tr>';
+  document.querySelector('#trades thead').innerHTML='<tr><th class="l">시간</th><th class="l">종목</th><th>구분</th><th>수량</th><th>체결가</th><th>금액</th><th>수수료</th><th>매도 손익</th></tr>';
   const rows=log.slice().reverse();
-  document.querySelector('#trades tbody').innerHTML=rows.map(t=>`<tr>
+  document.querySelector('#trades tbody').innerHTML=rows.map(t=>{
+    const rz=(t.side==='SELL'&&t.realized!=null)
+      ? `<b class="${sgn(t.realized)}">${t.realized>=0?'+':''}${money(t.realized)}${t.realized_pct!=null?` (${t.realized>=0?'+':''}${pct(t.realized_pct)})`:''}</b>`
+      : '<span class="meta">–</span>';
+    return `<tr>
     <td class="l">${t.time}</td><td class="l">${t.name}</td>
     <td class="${t.side==='BUY'?'buy':'sell'}">${t.side==='BUY'?'매수':'매도'}</td>
-    <td>${sh(t.shares)}</td><td>${px(t.price)}</td><td>${money(t.amount)}</td><td>${money(t.commission)}</td></tr>`).join('')
-    ||'<tr><td class="l meta" colspan="7">아직 매매 없음</td></tr>';
+    <td>${sh(t.shares)}</td><td>${px(t.price)}</td><td>${money(t.amount)}</td><td>${money(t.commission)}</td><td>${rz}</td></tr>`;}).join('')
+    ||'<tr><td class="l meta" colspan="8">아직 매매 없음</td></tr>';
 }
 function render(){
   if(DATA.error){
@@ -196,28 +249,226 @@ function render(){
   if(!document.getElementById('pods')) document.getElementById('main').innerHTML=MAIN_HTML;
   const m=DATA.meta;
   document.getElementById('meta').textContent=`${m.n_tickers}종목 · 갱신 ${m.computed_at}`;
-  banner();pods();eqchart();stockchart();holds();tradesUI();
+  banner();pods();eqchart();stockchart();board();holds();tradesUI();
 }
 async function load(refresh){
   const btn=document.getElementById('refresh'),st=document.getElementById('status');
   btn.disabled=true; st.innerHTML='<span class="spin"></span> '+(refresh?'시세 수신…':'로딩…');
   try{
     const res=await fetch(`/api/${refresh?'refresh':'results'}?market=${MARKET}&mode=${MODE}`,{method:refresh?'POST':'GET'});
+    if(!res.ok) throw new Error('HTTP '+res.status);
     DATA=await res.json(); render(); st.textContent='';
-  }catch(e){st.textContent='오류: '+e;}
+    if(MODE==='prev' && !DATA.error){ FULL=DATA; tlIdx=tlMaxIdx(); syncTLBar(); }
+    return true;
+  }catch(e){st.textContent='오류: '+e; console.error('[로드 실패]',e); return false;}
   finally{btn.disabled=false;}
 }
 function bindSeg(id,setter){document.querySelectorAll('#'+id+' button').forEach(b=>b.onclick=()=>{
   document.querySelectorAll('#'+id+' button').forEach(x=>x.classList.remove('on'));
   b.classList.add('on'); setter(b.dataset.v); load(false);});}
-bindSeg('mkt',v=>MARKET=v);
-bindSeg('mode',v=>MODE=v);
+bindSeg('mkt',v=>{MARKET=v; tlStop();});
+bindSeg('mode',v=>{MODE=v; applyMode();});
 document.getElementById('refresh').onclick=()=>load(true);
-function setupAuto(){if(autoTimer){clearInterval(autoTimer);autoTimer=null;}
-  if(document.getElementById('auto').checked)
-    autoTimer=setInterval(()=>load(true),+document.getElementById('interval').value*1000);}
+
+// ---- 모드 전환: today=자동갱신 / prev=타임랩스(갱신과 완전 별개) ----
+function applyMode(){
+  const prev=MODE==='prev';
+  document.getElementById('livectl').style.display=prev?'none':'inline-flex';
+  document.getElementById('tlctl').classList.toggle('show',prev);
+  tlStop();
+  document.getElementById('auto').checked=!prev; setupAuto();   // 전날 장이면 자동 갱신 OFF
+  if(prev) autoLog('전날 장 모드 — 자동 갱신 끔, 🎬 타임랩스 재생 사용 가능');
+}
+
+// ===== 🎬 타임랩스: 전날 세션을 1회만 받아두고 클라이언트에서 부드럽게 재생 =====
+// 서버를 다시 호출하지 않는다(갱신과 별개). 커서(분)를 개장→마감으로 흘리며
+// 그 시점의 평가곡선·순위·수익률·보유·매매를 즉시 재계산해 그린다.
+const tlMaxIdx=()=>(FULL&&FULL.times)?FULL.times.length-1:0;
+const tlStepIdx=()=>Math.max(1,Math.round((tlMaxIdx()+1)/300))*(+document.getElementById('tlspeed').value);
+function tlMetricsAt(name,i){
+  const a=(FULL.equity[name]||[]),cap=FULL.meta.capital;
+  let cur=cap,peak=cap,run=cap,mdd=0,up=0,cnt=0,prev=null;
+  for(let j=0;j<=i&&j<a.length;j++){const v=a[j]; if(v==null)continue;
+    if(prev!=null&&prev>0){if(v>prev)up++; cnt++;}
+    run=Math.max(run,v); mdd=Math.min(mdd,v/run-1); peak=Math.max(peak,v); cur=v; prev=v;}
+  return {DailyReturn:cur/cap-1,PeakGain:peak/cap-1,MaxDrawdown:mdd,
+          WinMinutes:cnt?up/cnt:null,FinalEquity:cur};
+}
+function tlTradesAt(name,i){const cut=FULL.times[i],all=FULL.trades[name]||[],out=[];
+  for(const t of all){if(t.time>cut)break; out.push(t);} return out;}
+function tlHoldingsAt(name,i){
+  const cap=FULL.meta.capital; let cash=cap; const sh={};
+  for(const t of tlTradesAt(name,i)){
+    const amt=(t.amount!=null)?t.amount:(t.shares*t.price);
+    if(t.side==='BUY'){cash-=amt+(t.commission||0); sh[t.ticker]=(sh[t.ticker]||0)+t.shares;}
+    else{cash+=amt-(t.commission||0); sh[t.ticker]=(sh[t.ticker]||0)-t.shares;
+      if(Math.abs(sh[t.ticker])<1e-9)delete sh[t.ticker];}
+  }
+  const pos=[]; let mv=0;
+  for(const tk in sh){const arr=FULL.prices[tk]; if(!arr)continue;
+    const pxv=arr[i],op=arr[0]; if(pxv==null)continue;
+    const val=sh[tk]*pxv; mv+=val;
+    pos.push({ticker:tk,name:(FULL.names&&FULL.names[tk])||tk,shares:sh[tk],price:pxv,value:val,
+      chg_open:(op?pxv/op-1:null)});}
+  pos.sort((a,b)=>b.value-a.value);
+  return {cash,positions:pos,total:cash+mv};
+}
+function tlFrame(i){
+  const cap=FULL.meta.capital, names=FULL.leaderboard.map(r=>r.name);
+  const baseOf=n=>FULL.leaderboard.find(r=>r.name===n);
+  const board=names.map(n=>{const b=baseOf(n),m=tlMetricsAt(n,i),tr=tlTradesAt(n,i);
+    const rz=tr.reduce((s,t)=>s+((t.side==='SELL'&&t.realized!=null)?t.realized:0),0);
+    return {name:n,tagline:b.tagline,leverage:b.leverage,bankrupt:b.bankrupt,
+      DailyReturn:m.DailyReturn,PeakGain:m.PeakGain,MaxDrawdown:m.MaxDrawdown,
+      WinMinutes:m.WinMinutes,FinalEquity:m.FinalEquity,n_trades:tr.length,
+      RealizedPnL:rz,RealizedReturn:rz/cap};});
+  board.sort((a,b)=>b.DailyReturn-a.DailyReturn); board.forEach((r,k)=>r.rank=k+1);
+  const holdings={},trades={};
+  for(const n of names){const h=tlHoldingsAt(n,i),b=baseOf(n),rz=board.find(r=>r.name===n).RealizedPnL;
+    holdings[n]={total:h.total,cash:h.cash,leverage:b.leverage,bankrupt:b.bankrupt,
+      realized:rz,realized_pct:rz/cap,n_trades:tlTradesAt(n,i).length,
+      positions:h.positions.map(p=>({ticker:p.ticker,name:p.name,shares:p.shares,price:p.price,
+        value:p.value,weight:h.total?p.value/h.total:null,chg_open:p.chg_open}))};
+    trades[n]=tlTradesAt(n,i);}
+  const hp={};
+  for(const tk in FULL.held_prices){const o=FULL.held_prices[tk];
+    hp[tk]={name:o.name,pct:o.pct.slice(0,i+1),last_pct:o.pct[i],
+      last_price:(FULL.prices[tk]?FULL.prices[tk][i]:o.last_price),
+      holders:names.filter(n=>holdings[n].positions.some(p=>p.ticker===tk))};}
+  return {meta:{...FULL.meta,n_bars:i+1,current_time:FULL.times[i],
+      view_kind:'timelapse',view_label:`🎬 타임랩스 — ${FULL.times[i]} 재생 중`},
+    times:FULL.times.slice(0,i+1),leaderboard:board,
+    equity:Object.fromEntries(names.map(n=>[n,(FULL.equity[n]||[]).slice(0,i+1)])),
+    holdings,taglines:FULL.taglines,held_prices:hp,trades,prices:FULL.prices,names:FULL.names};
+}
+function tlRenderFrame(i){DATA=tlFrame(i); banner();pods();eqchart();stockchart();board();holds();tradesUI();}
+function syncTLBar(){const max=tlMaxIdx(),bar=document.getElementById('tlbar');
+  bar.min=1; bar.max=Math.max(1,max); bar.value=Math.min(tlIdx,max);
+  const tm=(FULL&&FULL.times)?FULL.times[Math.min(tlIdx,max)]:'';
+  document.getElementById('tlstat').textContent=`${Math.min(tlIdx,max)+1}/${max+1}분 · ${tm||''}`;}
+function tlStop(){tlPlaying=false; if(tlTimer){clearTimeout(tlTimer);tlTimer=null;}
+  const b=document.getElementById('tlplay'); if(b)b.textContent='▶ 재생';}
+function tlGoto(i){tlIdx=Math.max(1,Math.min(i,tlMaxIdx())); tlRenderFrame(tlIdx); syncTLBar();}
+function tlPlay(){
+  if(!FULL||tlMaxIdx()<2)return;
+  if(tlIdx>=tlMaxIdx()) tlIdx=Math.max(1,Math.min(20,tlMaxIdx()));   // 끝이면 처음부터
+  tlPlaying=true; document.getElementById('tlplay').textContent='⏸ 정지';
+  autoLog(`🎬 타임랩스 재생 시작 (${tlIdx+1} → ${tlMaxIdx()+1}분)`);
+  const tick=()=>{ if(!tlPlaying)return;
+    tlIdx=Math.min(tlMaxIdx(),tlIdx+tlStepIdx()); tlRenderFrame(tlIdx); syncTLBar();
+    if(tlIdx>=tlMaxIdx()){tlStop(); autoLog('🎬 타임랩스 종료(종가 청산까지 재생 완료)'); return;}
+    tlTimer=setTimeout(tick,60); };
+  tick();
+}
+document.getElementById('tlplay').onclick=()=>tlPlaying?tlStop():tlPlay();
+document.getElementById('tlrewind').onclick=()=>{tlStop(); tlGoto(Math.min(20,tlMaxIdx()));};
+document.getElementById('tlbar').oninput=e=>{tlStop(); tlGoto(+e.target.value);};
+document.getElementById('tlspeed').onchange=()=>{};
+
+// ---- 자동 갱신: setTimeout 자기-예약 루프(요청 중첩 방지 + 예외 시에도 계속) ----
+const autoOn=()=>document.getElementById('auto').checked;
+const intervalSec=()=>+document.getElementById('interval').value;
+function autoLog(msg){console.log(`[자동갱신 ${new Date().toLocaleTimeString()}] ${msg}`);}
+function setAutoStat(text,on){const el=document.getElementById('autostat');
+  el.textContent=text; el.className=on?'on':'off';}
+function updateCountdown(){
+  if(!autoOn())return;
+  const left=Math.max(0,Math.ceil((nextRefreshAt-Date.now())/1000));
+  setAutoStat(`🟢 자동 ON · ${intervalSec()}초 주기 · 다음 갱신 ${left}초`,true);
+}
+function scheduleNext(){
+  if(!autoOn())return;
+  nextRefreshAt=Date.now()+intervalSec()*1000;
+  autoTimer=setTimeout(autoTick,intervalSec()*1000);
+  updateCountdown();
+}
+async function autoTick(){
+  if(AUTO_BUSY){
+    autoLog('이전 갱신이 아직 진행 중 — 이번 주기는 건너뜀');
+  }else{
+    AUTO_BUSY=true;
+    try{
+      autoLog('갱신 요청…');
+      const ok=await load(true);
+      autoLog(ok?'갱신 완료':'갱신 실패(서버/네트워크) — 다음 주기에 재시도');
+    }catch(e){
+      autoLog('예외 발생: '+e+' — 다음 주기에 재시도');
+    }finally{
+      AUTO_BUSY=false;
+    }
+  }
+  scheduleNext();           // 성공·실패와 무관하게 항상 다음 주기 예약(루프 유지)
+}
+function setupAuto(){
+  if(autoTimer){clearTimeout(autoTimer);autoTimer=null;}
+  if(countdownTimer){clearInterval(countdownTimer);countdownTimer=null;}
+  if(autoOn()){
+    autoLog(`자동 갱신 켜짐 · 주기 ${intervalSec()}초`);
+    countdownTimer=setInterval(updateCountdown,1000);
+    scheduleNext();
+  }else{
+    autoLog('자동 갱신 꺼짐');
+    setAutoStat('⚪ 자동 OFF',false);
+  }
+}
 document.getElementById('auto').onchange=setupAuto;
 document.getElementById('interval').onchange=setupAuto;
+
+// ===== 📄 결과 보고서 모달 (봇별 퀀트 분석 자료) =====
+function repRow(k,v){return `<div><span class="k">${k}</span><span>${v}</span></div>`;}
+function repCard(b){
+  const lv=b.leverage>1?` <span class="lev">${b.leverage}x</span>`:'';
+  const bt=b.best_trade, wt=b.worst_trade;
+  const sd=v=>v==null?'–':(v>=0?'+':'')+pct(v);
+  const sm=v=>v==null?'–':(v>=0?'+':'')+money(v);
+  const num=(v,d=2)=>v==null?'–':(+v).toFixed(d);
+  return `<div class="repcard"><h3>#${b.rank} ${b.name}${lv} ${b.bankrupt?'<span class="lev bust">청산</span>':''}
+    <span class="meta">${b.tagline}</span></h3>
+    <div class="repgrid">
+      ${repRow('하루수익률',`<b class="${sgn(b.daily_return)}">${sd(b.daily_return)}</b>`)}
+      ${repRow('매도 실현수익률',`<b class="${sgn(b.realized_return)}">${sd(b.realized_return)}</b>`)}
+      ${repRow('매도 실현손익',`<b class="${sgn(b.realized_pnl)}">${sm(b.realized_pnl)}</b>`)}
+      ${repRow('최종자산',money(b.final_equity))}
+      ${repRow('고점',sd(b.peak_gain))}
+      ${repRow('최대낙폭',sd(b.max_drawdown))}
+      ${repRow('분 변동성',pct(b.intraday_vol))}
+      ${repRow('상승분 비율',pct(b.win_minutes))}
+      ${repRow('총 매매',b.n_trades+'회')}
+      ${repRow('라운드트립',b.n_round_trips+'회')}
+      ${repRow('승률',pct(b.win_rate))}
+      ${repRow('손익비(PF)',num(b.profit_factor))}
+      ${repRow('기대값/트립',money(b.expectancy))}
+      ${repRow('평균 이익',money(b.avg_win))}
+      ${repRow('평균 손실',money(b.avg_loss))}
+      ${repRow('평균 보유',num(b.avg_hold_min,1)+'분')}
+      ${repRow('최대 보유',num(b.max_hold_min,0)+'분')}
+      ${repRow('회전율',num(b.turnover))}
+      ${repRow('총 수수료',money(b.total_commission))}
+      ${repRow('최고 매매',bt?`${bt.name} ${sm(bt.pnl)} (${sd(bt.ret)})`:'–')}
+      ${repRow('최악 매매',wt?`${wt.name} ${sm(wt.pnl)} (${sd(wt.ret)})`:'–')}
+    </div>
+    ${b.per_ticker&&b.per_ticker.length?`<div class="meta" style="margin-top:7px">종목별 실현손익: `+
+      b.per_ticker.slice().reverse().map(d=>`${d.name} <b class="${sgn(d.pnl)}">${sm(d.pnl)}</b>`).join(' · ')+`</div>`:''}
+  </div>`;
+}
+async function openReport(){
+  const modal=document.getElementById('reportModal'), body=document.getElementById('repBody');
+  modal.classList.add('show');
+  body.innerHTML='<div class="meta"><span class="spin"></span> 보고서 생성 중…</div>';
+  document.getElementById('repCsv').href=`/api/report?market=${MARKET}&mode=${MODE}&format=csv`;
+  try{
+    const r=await fetch(`/api/report?market=${MARKET}&mode=${MODE}`);
+    const rep=await r.json();
+    if(rep.error){body.innerHTML=`<div class="err">⚠️ ${rep.error}</div>`; return;}
+    const m=rep.meta;
+    document.getElementById('repTitle').textContent=`📄 ${m.market_label} · ${m.mode==='prev'?'전날 장':'실시간'} · 세션 ${m.session_date} (${m.n_bars}/${m.total_bars}분)`;
+    body.innerHTML=rep.bots.map(repCard).join('');
+  }catch(e){body.innerHTML=`<div class="err">오류: ${e}</div>`;}
+}
+document.getElementById('report').onclick=openReport;
+document.getElementById('repClose').onclick=()=>document.getElementById('reportModal').classList.remove('show');
+document.getElementById('reportModal').onclick=e=>{if(e.target.id==='reportModal')e.target.classList.remove('show');};
+
 load(false); setupAuto();
 </script>
 </body>
