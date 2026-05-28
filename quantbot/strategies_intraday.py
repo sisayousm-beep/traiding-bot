@@ -345,5 +345,156 @@ class Opus(IntradayStrategy):
         return {t: w for t in desired_set}
 
 
+class Gemini(IntradayStrategy):
+    """4대 매매 알고리즘으로 '확실한 자리만 저격'하는 저회전 정밀 봇.
+
+    ① 동적 시장 레짐 필터 2.0 — 워밍업 15분 뒤, 시장 폭(VWAP 상회 비율)과 '지수 방향'을
+       동시에 본다. breadth≥0.55 AND 지수↑ 일 때만 '공격 모드'. breadth<0.40 이거나
+       지수가 무너지면 전량 현금으로 그날은 관망(halt 래치 — 재진입 안 함).
+       (※ 엔진에 코스피200/나스닥 선물 피드가 없어 '지수'는 유니버스 등가중 지수의
+        당일 방향으로 대용한다.)
+    ② 4중 확인 진입 — 네 조건을 모두 충족하는 종목만 저격 매수:
+       (Orion) 개장 첫 15분 고가 상향 돌파 · (Atlas) 시초 대비 수익률 양수 상위 ·
+       (안전 바닥) 현재가가 VWAP +0.5%~+2% 밴드 안(과열 추격 금지) ·
+       (수급) 최근 5분 분당 거래량이 당일 평균의 200% 이상 폭발.
+    ③ 타이트한 동적 손절/익절 — 진입 즉시 매수가 대비 -1.5% 고정 손절. 이익이 +3%를
+       넘는 순간부터 고점 대비 -2% 추격손절로 전환(딴 이익 보존). 손절난 종목은 30분 쿨다운.
+    ④ 최소 재밸런싱 — 신규 진입 의사결정은 15분 주기. 추세가 살아있으면 종가까지 보유하고,
+       구성이 바뀔 때만 주문(회전율 ≤ 1.5배 목표). 손절을 실제로 작동시키려면 감시는
+       촘촘해야 하므로 엔진 호출은 3분마다 받되, 보유 유지면 빈 비중을 반환해 회전을 0으로 둔다.
+    """
+    name = "Gemini"
+    tagline = "4중 확인 저격 진입·-1.5%/+3%→-2% 동적 손절·저회전 (개발: Gemini)"
+    warmup_min = 15
+    rebalance_min = 3          # 손절 감시 주기(보유 유지는 {} 반환 → 회전 0)
+    leverage = 1.0
+    _CASH = {"__CASH__": 0.0}  # truthy지만 유효비중 없음 → 엔진이 전량 매도(현금화)
+
+    def __init__(self, top_n: int = 2, scan: int = 15, or_min: int = 15,
+                 band_lo: float = 0.005, band_hi: float = 0.02,
+                 vol_mult: float = 2.0, vol_recent: int = 5,
+                 hard_stop: float = 0.015, trail_trigger: float = 0.03,
+                 trail_stop: float = 0.02, cooldown: int = 30,
+                 enter_breadth: float = 0.55, exit_breadth: float = 0.40,
+                 index_collapse: float = -0.005):
+        self.top_n = top_n
+        self.scan = scan                  # 신규 진입 의사결정 주기(분)
+        self.or_min = or_min              # 오프닝 레인지(분)
+        self.band_lo = band_lo; self.band_hi = band_hi   # VWAP 대비 안전 매수 밴드
+        self.vol_mult = vol_mult; self.vol_recent = vol_recent
+        self.hard_stop = hard_stop        # 매수가 대비 고정 손절
+        self.trail_trigger = trail_trigger  # 이 이익을 넘으면 추격손절 전환
+        self.trail_stop = trail_stop      # 고점 대비 추격손절 폭
+        self.cooldown = cooldown
+        self.enter_breadth = enter_breadth
+        self.exit_breadth = exit_breadth
+        self.index_collapse = index_collapse  # 지수 붕괴 임계(이하면 그날 관망)
+        self._held: set[str] = set()
+        self._entry: dict[str, float] = {}
+        self._peak: dict[str, float] = {}
+        self._cool: dict[str, int] = {}
+        self._last_scan = -10 ** 9
+        self._halt = False                # 그날 관망 래치(자본 방어)
+
+    def weights(self, closes, volumes, open_px):
+        n = closes.shape[0]
+        avail = self._avail(closes)
+        if not avail or n < self.or_min + 1:
+            return {}
+
+        last = closes.iloc[-1][avail]
+        pv = (closes[avail] * volumes[avail]).cumsum()
+        vv = volumes[avail].cumsum().replace(0, pd.NA)
+        vwap = (pv / vv).iloc[-1]
+        ret_open = last / open_px[avail] - 1.0
+        index_ret = float(ret_open.mean())            # 등가중 지수(=시장) 방향 대용
+        above = last > vwap
+        breadth = float(above.mean())
+
+        self._cool = {t: c - 1 for t, c in self._cool.items() if c - 1 > 0}
+        for t in list(self._held):                    # 보유 종목 장중 고점 갱신
+            if t in last.index and pd.notna(last[t]):
+                self._peak[t] = max(self._peak.get(t, float(last[t])), float(last[t]))
+
+        # 이미 그날 관망(halt) 래치가 걸렸으면 전량 현금 유지
+        if self._halt:
+            return self._flatten() if self._held else {}
+
+        # ③ 보유 손절/익절 판정 — 매 호출(3분)마다 감시해야 -1.5%/-2% 손절이 실제로 작동
+        survivors = []
+        for t in list(self._held):
+            px = float(last.get(t, float("nan")))
+            if px != px:
+                survivors.append(t); continue
+            entry = self._entry.get(t, px)
+            peak = self._peak.get(t, px)
+            if peak >= entry * (1 + self.trail_trigger):          # +3% 도달 → 추격손절
+                out = px < peak * (1 - self.trail_stop)
+            else:                                                  # 그 전 → 고정 손절
+                out = px < entry * (1 - self.hard_stop)
+            if out:
+                self._cool[t] = self.cooldown
+            else:
+                survivors.append(t)
+
+        # ①+② 레짐 판단·신규 진입은 '의사결정 주기(15분)'에만. 1분 노이즈로 그날을
+        #     통째로 관망시키지 않으려고 매 틱이 아니라 결정 시점에 레짐을 평가한다.
+        #     (틱 사이의 위험은 ③ 손절이 막는다.)
+        desired = list(survivors)
+        if (n - self._last_scan) >= self.scan:
+            self._last_scan = n
+            if breadth < self.exit_breadth or index_ret < self.index_collapse:
+                self._halt = True                                 # 붕괴 → 그날 관망 래치
+                desired = []
+            elif breadth >= self.enter_breadth and index_ret > 0:  # 공격 모드
+                free = self.top_n - len(desired)
+                if free > 0:
+                    or_high = closes[avail].iloc[: self.or_min].max()
+                    day_avg_vol = volumes[avail].mean()
+                    recent_vol = volumes[avail].iloc[-self.vol_recent:].mean()
+                    band = last / vwap - 1.0
+                    cand = []
+                    for t in avail:
+                        if t in desired or t in self._cool:
+                            continue
+                        if not (float(ret_open.get(t, 0.0)) > 0):                 # Atlas 기세
+                            continue
+                        if not (last[t] > float(or_high.get(t, float("inf")))):   # Orion 돌파
+                            continue
+                        b = float(band.get(t, 9.0))
+                        if not (self.band_lo <= b <= self.band_hi):               # 안전 밴드
+                            continue
+                        da = float(day_avg_vol.get(t, 0.0) or 0.0)
+                        rc = float(recent_vol.get(t, 0.0) or 0.0)
+                        if not (da > 0 and rc >= self.vol_mult * da):             # 수급 폭발
+                            continue
+                        cand.append(t)
+                    cand.sort(key=lambda t: -float(ret_open[t]))                  # 기세 강한 순
+                    desired.extend(cand[:free])
+
+        desired = desired[: self.top_n]
+        new_set = set(desired)
+
+        # ④ 사건기반: 구성 같으면 보유(회전 0), 다르면 교체. 빈 슬롯은 고정 비중(저격 사이즈)
+        if new_set == self._held:
+            return {}
+        for t in new_set:                                  # 신규 진입만 매수가/고점 등록
+            if t not in self._entry:
+                self._entry[t] = float(last[t])
+                self._peak[t] = float(last[t])
+        for t in list(self._entry):                        # 빠진 종목 추적 정리
+            if t not in new_set:
+                self._entry.pop(t, None); self._peak.pop(t, None)
+        self._held = new_set
+        if not new_set:
+            return dict(self._CASH)
+        w = self.leverage / self.top_n                     # 슬롯 고정(승자 자동 증액 안 함)
+        return {t: w for t in new_set}
+
+    def _flatten(self):
+        self._held = set(); self._entry = {}; self._peak = {}
+        return dict(self._CASH)
+
+
 def default_bots() -> list[IntradayStrategy]:
-    return [Atlas(), Orion(), Titan(), Claude(), Opus(), Sol()]
+    return [Atlas(), Orion(), Titan(), Claude(), Opus(), Gemini(), Sol()]
