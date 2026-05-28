@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>당일 단타 봇 경쟁</title>
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+<style>
+  :root{--bg:#0d1117;--panel:#161b22;--border:#30363d;--text:#e6edf3;--muted:#8b949e;
+        --green:#3fb950;--red:#f85149;--accent:#58a6ff;--gold:#e3b341;}
+  *{box-sizing:border-box;}
+  body{margin:0;background:var(--bg);color:var(--text);
+       font-family:'Segoe UI',-apple-system,'Malgun Gothic',sans-serif;}
+  header{padding:14px 24px;border-bottom:1px solid var(--border);display:flex;
+         align-items:center;gap:18px;flex-wrap:wrap;}
+  h1{font-size:18px;margin:0;}
+  .meta{color:var(--muted);font-size:13px;}
+  .controls{margin-left:auto;display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
+  .seg{display:flex;border:1px solid var(--border);border-radius:8px;overflow:hidden;}
+  .seg button{background:var(--panel);color:var(--muted);border:none;padding:8px 14px;
+              cursor:pointer;font-size:13px;}
+  .seg button.on{background:var(--accent);color:#fff;font-weight:700;}
+  button{background:var(--accent);color:#fff;border:none;padding:8px 16px;border-radius:6px;
+         cursor:pointer;font-size:13px;font-weight:600;}
+  button:disabled{opacity:.5;cursor:wait;}
+  label{font-size:13px;color:var(--muted);display:flex;align-items:center;gap:6px;}
+  select{background:var(--panel);color:var(--text);border:1px solid var(--border);
+         border-radius:6px;padding:6px;}
+  main{padding:18px 24px;display:grid;gap:18px;}
+  .panel{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:16px;}
+  .panel h2{font-size:15px;margin:0 0 12px;}
+  .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:12px;}
+  .pod{background:#0d1117;border:1px solid var(--border);border-radius:10px;padding:14px;position:relative;}
+  .pod .r{position:absolute;top:10px;right:12px;font-size:12px;color:var(--muted);}
+  .pod .nm{font-size:15px;font-weight:700;}
+  .pod .ret{font-size:26px;font-weight:800;margin:6px 0 2px;}
+  .pod .sub{font-size:11px;color:var(--muted);line-height:1.4;}
+  .lev{display:inline-block;font-size:10px;padding:1px 6px;border-radius:8px;background:#bb800933;color:var(--gold);margin-left:5px;}
+  .bust{background:#f8514933;color:var(--red);}
+  .pos{color:var(--green);} .neg{color:var(--red);}
+  table{width:100%;border-collapse:collapse;font-size:13px;}
+  th,td{padding:7px 10px;text-align:right;border-bottom:1px solid var(--border);white-space:nowrap;}
+  th{color:var(--muted);}
+  td.l,th.l{text-align:left;}
+  .grid2{display:grid;grid-template-columns:2fr 1fr;gap:18px;}
+  .holds{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px;}
+  .hcard{background:#0d1117;border:1px solid var(--border);border-radius:8px;padding:11px;}
+  .hcard h3{margin:0 0 4px;font-size:14px;}
+  .hcard .tg{color:var(--muted);font-size:11px;margin-bottom:6px;}
+  .plist div{display:flex;justify-content:space-between;font-size:12px;color:var(--muted);padding:1px 0;}
+  .plist b{color:var(--text);}
+  #status{font-size:12px;color:var(--muted);}
+  .spin{display:inline-block;width:12px;height:12px;border:2px solid var(--muted);
+        border-top-color:var(--accent);border-radius:50%;animation:s .8s linear infinite;vertical-align:middle;}
+  @keyframes s{to{transform:rotate(360deg)}}
+  .err{background:#f8514922;border:1px solid var(--red);padding:14px;border-radius:8px;color:#ffa198;}
+  @media(max-width:880px){.grid2{grid-template-columns:1fr;}}
+</style>
+</head>
+<body>
+<header>
+  <h1>⚡ 당일 단타 봇 경쟁</h1>
+  <div class="meta" id="meta">로딩 중…</div>
+  <div class="controls">
+    <span id="status"></span>
+    <div class="seg" id="seg">
+      <button data-m="today" class="on">오늘(실시간)</button>
+      <button data-m="prev">전날 장</button>
+    </div>
+    <label><input type="checkbox" id="auto"> 자동</label>
+    <select id="interval"><option value="30">30초</option><option value="60" selected>60초</option><option value="120">2분</option></select>
+    <button id="refresh">최신 시세로 갱신</button>
+  </div>
+</header>
+<main id="main">
+  <section class="panel"><h2>🏁 봇별 하루 수익률</h2><div class="cards" id="pods"></div></section>
+  <div class="grid2">
+    <section class="panel"><h2>📈 장중 평가곡선 ($10,000 시작)</h2><div id="chart" style="height:430px;"></div></section>
+    <section class="panel"><h2>📊 상세 지표</h2><div style="overflow:auto;max-height:430px;"><table id="board"><thead></thead><tbody></tbody></table></div></section>
+  </div>
+  <section class="panel"><h2>💼 봇별 현재 보유 종목</h2><div class="holds" id="holds"></div></section>
+</main>
+
+<script>
+const COLORS={Atlas:'#58a6ff',Nova:'#3fb950',Orion:'#e3b341',Vega:'#bc8cff','Titan-3X':'#f85149',Sol:'#8b949e'};
+let DATA=null, MODE='today', autoTimer=null;
+const MAIN_HTML=document.getElementById('main').innerHTML;
+const col=n=>COLORS[n]||'#58a6ff';
+const pct=v=>v==null?'–':(v*100).toFixed(2)+'%';
+const usd=v=>v==null?'–':'$'+Math.round(v).toLocaleString();
+const sgn=v=>v==null?'':(v>=0?'pos':'neg');
+
+function pods(){
+  document.getElementById('pods').innerHTML = DATA.leaderboard.map(r=>{
+    const medal=['🥇','🥈','🥉'][r.rank-1]||('#'+r.rank);
+    const lev=r.leverage>1?`<span class="lev">${r.leverage}x</span>`:'';
+    const bust=r.bankrupt?`<span class="lev bust">청산</span>`:'';
+    return `<div class="pod" style="border-color:${col(r.name)}55">
+      <div class="r">${medal}</div>
+      <div class="nm">${r.name}${lev}${bust}</div>
+      <div class="ret ${sgn(r.DailyReturn)}">${r.DailyReturn>=0?'+':''}${pct(r.DailyReturn)}</div>
+      <div class="sub">고점 ${pct(r.PeakGain)} · 낙폭 ${pct(r.MaxDrawdown)}<br>${usd(r.FinalEquity)} · ${r.n_trades}회 매매</div>
+    </div>`;
+  }).join('');
+}
+function chart(){
+  const traces=Object.keys(DATA.equity).map(n=>({
+    x:DATA.times,y:DATA.equity[n],name:n,mode:'lines',
+    line:{width:n==='Titan-3X'?2.4:1.6,color:col(n)},
+    hovertemplate:'%{x}<br>'+n+': $%{y:,.0f}<extra></extra>'}));
+  Plotly.react('chart',traces,{
+    paper_bgcolor:'#161b22',plot_bgcolor:'#161b22',font:{color:'#e6edf3',size:11},
+    margin:{l:60,r:12,t:8,b:36},legend:{orientation:'h',y:-0.13,font:{size:10}},
+    xaxis:{gridcolor:'#30363d'},yaxis:{gridcolor:'#30363d',title:'평가액'},
+    shapes:[{type:'line',x0:DATA.times[0],x1:DATA.times[DATA.times.length-1],
+      y0:DATA.meta.initial_capital,y1:DATA.meta.initial_capital,
+      line:{color:'#8b949e',width:1,dash:'dash'}}]
+  },{responsive:true,displayModeBar:false});
+}
+const COLS=[['rank','#','l'],['name','봇','l'],['DailyReturn','하루수익','s'],['PeakGain','고점','s'],
+  ['MaxDrawdown','최대낙폭','s'],['IntradayVol','분변동성',''],['WinMinutes','상승분비율',''],['n_trades','매매',''],['FinalEquity','최종자산','']];
+function board(){
+  document.querySelector('#board thead').innerHTML='<tr>'+COLS.map(c=>`<th class="${c[2]==='l'?'l':''}">${c[1]}</th>`).join('')+'</tr>';
+  document.querySelector('#board tbody').innerHTML=DATA.leaderboard.map(r=>'<tr>'+COLS.map(c=>{
+    let v=r[c[0]],t;
+    if(c[0]==='rank') t=r.rank; else if(c[0]==='name') t=r.name+(r.leverage>1?` <span class="lev">${r.leverage}x</span>`:'');
+    else if(c[0]==='n_trades') t=v;
+    else if(c[0]==='FinalEquity') t=usd(v);
+    else t=pct(v);
+    return `<td class="${c[2]==='l'?'l':(c[2]==='s'?sgn(v):'')}">${t}</td>`;
+  }).join('')+'</tr>').join('');
+}
+function holds(){
+  document.getElementById('holds').innerHTML=DATA.leaderboard.map(r=>{
+    const h=DATA.holdings[r.name];
+    const list=h.positions.length?h.positions.map(p=>`<div><b>${p.ticker}</b><span>${p.shares.toFixed(1)}주 · ${pct(p.weight)} · ${usd(p.value)}</span></div>`).join(''):'<div>전액 현금(관망/청산)</div>';
+    return `<div class="hcard"><h3>${r.name}${r.leverage>1?` <span class="lev">${r.leverage}x</span>`:''}</h3>
+      <div class="tg">${DATA.taglines[r.name]||''}</div>
+      <div>총자산 <b>${usd(h.total)}</b> · 현금 ${usd(h.cash)}</div>
+      <div class="plist">${list}</div></div>`;
+  }).join('');
+}
+function render(){
+  if(DATA.error){
+    document.getElementById('meta').textContent=`[${MODE==='today'?'오늘':'전날'} 모드]`;
+    document.getElementById('main').innerHTML=`<div class="err">⚠️ ${DATA.error}<br><span class="meta">다른 모드를 선택하거나, 미국 장 시간(한국 22:30~05:00)에 다시 시도하세요.</span></div>`;
+    return;
+  }
+  if(!document.getElementById('pods')) document.getElementById('main').innerHTML=MAIN_HTML;
+  const m=DATA.meta;
+  document.getElementById('meta').textContent=`${m.mode==='today'?'오늘(실시간)':'전날 장'} · 세션 ${m.session_date} · ${m.n_bars}분봉 · ${m.n_tickers}종목 · 갱신 ${m.computed_at}`;
+  pods();chart();board();holds();
+}
+async function load(refresh){
+  const btn=document.getElementById('refresh'),st=document.getElementById('status');
+  btn.disabled=true; st.innerHTML='<span class="spin"></span> '+(refresh?'시세 수신…':'로딩…');
+  try{
+    const res=await fetch(`/api/${refresh?'refresh':'results'}?mode=${MODE}`,{method:refresh?'POST':'GET'});
+    DATA=await res.json();
+    render(); st.textContent='';
+  }catch(e){st.textContent='오류: '+e;}
+  finally{btn.disabled=false;}
+}
+document.querySelectorAll('#seg button').forEach(b=>b.onclick=()=>{
+  document.querySelectorAll('#seg button').forEach(x=>x.classList.remove('on'));
+  b.classList.add('on'); MODE=b.dataset.m;
+  // main이 에러로 교체됐을 수 있으니 복구 후 로드
+  load(false);
+});
+document.getElementById('refresh').onclick=()=>load(true);
+function setupAuto(){
+  if(autoTimer){clearInterval(autoTimer);autoTimer=null;}
+  if(document.getElementById('auto').checked)
+    autoTimer=setInterval(()=>load(true),+document.getElementById('interval').value*1000);
+}
+document.getElementById('auto').onchange=setupAuto;
+document.getElementById('interval').onchange=setupAuto;
+load(false);
+</script>
+</body>
+</html>

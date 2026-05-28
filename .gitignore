@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 데이터 캐시 / 결과물 (실데이터는 재생성 가능)
+data_cache/
+results/
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
