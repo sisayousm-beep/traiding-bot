@@ -24,7 +24,7 @@ class IntradayResult:
 
 
 def run_intraday(bots: list[IntradayStrategy], closes: pd.DataFrame,
-                 volumes: pd.DataFrame, capital: float = config.INITIAL_CAPITAL,
+                 volumes: pd.DataFrame, capital: float = 10_000.0,
                  flatten_eod: bool = True) -> list[IntradayResult]:
     closes = closes.sort_index()
     volumes = volumes.reindex(closes.index).fillna(0)

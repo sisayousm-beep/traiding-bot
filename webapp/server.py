@@ -1,13 +1,12 @@
 """당일 단타 봇 경쟁 — 시각화 웹 서버 (Flask).
 
-두 모드를 따로 시뮬레이션:
-  - prev  : 전날 장(직전 세션)으로 백테스트
-  - today : 오늘(최근) 세션, 장중 실시간 정보 반영
+시장(미장 us / 국장 kr) × 모드(전날 prev / 오늘 today)를 각각 독립 시뮬레이션.
+today 모드는 장중이면 실시간(현재 시각까지), 장 마감 시간대면 리플레이.
 
 엔드포인트:
-  GET  /                       대시보드
-  GET  /api/results?mode=...   해당 모드의 캐시된 결과(없으면 계산)
-  POST /api/refresh?mode=...   최신 1분봉 재수신 후 재시뮬레이션
+  GET  /                                  대시보드
+  GET  /api/results?market=&mode=         결과(JSON)
+  POST /api/refresh?market=&mode=         최신 1분봉 재수신 후 재계산
 """
 from __future__ import annotations
 
@@ -16,37 +15,45 @@ import threading
 
 from flask import Flask, jsonify, render_template, request
 
-from quantbot import config
-from quantbot.intraday_data import load_intraday
+from quantbot import config, live
+from quantbot.intraday_data import load_session
 from quantbot.intraday_engine import run_intraday
 from quantbot.intraday_metrics import to_payload
 from quantbot.strategies_intraday import default_bots
 
 app = Flask(__name__)
-
 _lock = threading.Lock()
-_cache: dict = {"prev": None, "today": None}
 
 
-def _compute(mode: str) -> dict:
+def _compute(market: str, mode: str) -> dict:
     with _lock:
-        c, v, sess, status = load_intraday(mode)
+        m = config.MARKETS[market]
+        c_full, v_full, sess, status, is_today = load_session(market, mode)
         if status != "ok":
-            msg = {"no_session": "직전 세션 데이터가 아직 없습니다(주말/장 시작 전).",
-                   "no_data": "해당 세션의 1분봉 데이터를 받지 못했습니다."}.get(status, status)
+            msg = {"no_session": "직전 세션 데이터가 아직 없습니다(주말/연휴/장 시작 전).",
+                   "no_data": "해당 세션 1분봉을 받지 못했습니다."}.get(status, status)
             payload = {"error": msg, "status": status,
-                       "meta": {"mode": mode, "session_date": str(sess) if sess else None}}
+                       "meta": {"market": market, "market_label": m["label"],
+                                "market_short": m["short"], "mode": mode,
+                                "open_kst": m["open_kst"], "close_kst": m["close_kst"],
+                                "session_date": str(sess) if sess else None}}
         else:
-            res = run_intraday(default_bots(), c, v, config.INITIAL_CAPITAL)
-            payload = to_payload(res, c, sess, mode, config.INITIAL_CAPITAL)
+            vw = live.view(market, mode, c_full, sess, is_today)
+            k = vw["k"]
+            c = c_full.iloc[:k]
+            v = v_full.iloc[:k]
+            res = run_intraday(default_bots(), c, v, m["capital"], flatten_eod=vw["flatten"])
+            payload = to_payload(res, c, sess, market, mode, m["capital"], vw)
         payload["meta"]["computed_at"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        _cache[mode] = payload
         return payload
 
 
-def _mode() -> str:
-    m = request.args.get("mode", "today")
-    return m if m in ("prev", "today") else "today"
+def _params():
+    market = request.args.get("market", config.DEFAULT_MARKET)
+    if market not in config.MARKETS:
+        market = config.DEFAULT_MARKET
+    mode = request.args.get("mode", "today")
+    return market, (mode if mode in ("prev", "today") else "today")
 
 
 @app.route("/")
@@ -56,13 +63,12 @@ def index():
 
 @app.route("/api/results")
 def api_results():
-    m = _mode()
-    return jsonify(_cache[m] if _cache[m] is not None else _compute(m))
+    return jsonify(_compute(*_params()))
 
 
 @app.route("/api/refresh", methods=["POST"])
 def api_refresh():
-    return jsonify(_compute(_mode()))
+    return jsonify(_compute(*_params()))
 
 
 def main():
