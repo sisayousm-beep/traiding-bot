@@ -131,7 +131,8 @@
     <div class="modal-head">
       <h2 id="repTitle">📄 그날 장 결과 보고서</h2>
       <span class="grow"></span>
-      <a class="act" id="repCsv" href="#">⬇ CSV 다운로드</a>
+      <a class="act" id="repCsv" href="#">⬇ CSV</a>
+      <a class="act" id="repJsonl" href="#" title="AI 학습용 JSONL (세션당 봇별 1줄, 시장 국면+알파 라벨)">⬇ AI학습(JSONL)</a>
       <button class="act" id="repClose">닫기 ✕</button>
     </div>
     <div id="repBody" class="modal-body"></div>
@@ -434,6 +435,28 @@ document.getElementById('interval').onchange=setupAuto;
 
 // ===== 📄 결과 보고서 모달 (봇별 퀀트 분석 자료) =====
 function repRow(k,v){return `<div><span class="k">${k}</span><span>${v}</span></div>`;}
+const REGIME_COL={strong_bull:'#3fb950',bull:'#56d364',flat:'#8b949e',bear:'#f0883e',strong_bear:'#f85149'};
+function marketBanner(me){
+  if(!me||!me.available) return '';
+  const sd=v=>v==null?'–':(v>=0?'+':'')+pct(v);
+  const c=REGIME_COL[me.regime]||'#8b949e';
+  const bt=me.best_ticker||{}, wt=me.worst_ticker||{};
+  return `<div class="repcard" style="border-left:5px solid ${c};margin-bottom:14px">
+    <h3>🌐 당일 장 평가 — <b style="color:${c}">${me.regime_label}</b>
+      <span class="meta">${me.regime_desc}</span></h3>
+    <div class="repgrid">
+      ${repRow('시장 하루수익률<br><span class="meta">등가중 매수보유=시장 그 자체</span>',`<b class="${sgn(me.market_return)}">${sd(me.market_return)}</b>`)}
+      ${repRow('장중 고점 / 저점',`${sd(me.peak_gain)} / ${sd(me.trough)}`)}
+      ${repRow('시장 최대낙폭',sd(me.max_drawdown))}
+      ${repRow('상승 / 하락 종목',`${me.n_up} / ${me.n_down} <span class="meta">(총 ${me.n_tickers})</span>`)}
+      ${repRow('상승종목 비율(breadth)',pct(me.breadth_up))}
+      ${repRow('장 흐름',me.trend_shape+` <span class="meta">(전반 ${sd(me.morning_return)} · 후반 ${sd(me.afternoon_return)})</span>`)}
+      ${repRow('최고 종목',bt.name?`${bt.name} <b class="pos">${sd(bt.return)}</b>`:'–')}
+      ${repRow('최악 종목',wt.name?`${wt.name} <b class="neg">${sd(wt.return)}</b>`:'–')}
+    </div>
+    <div class="meta" style="margin-top:7px">※ 봇 성과는 이 시장 대비 <b>알파(초과수익)</b>로 봐야 진짜 실력이 보입니다. 상승장이면 형편없는 봇도, 하락장이면 고수 봇도 영향을 받습니다.</div>
+  </div>`;
+}
 function repCard(b){
   const lv=b.leverage>1?` <span class="lev">${b.leverage}x</span>`:'';
   const bt=b.best_trade, wt=b.worst_trade;
@@ -444,6 +467,7 @@ function repCard(b){
     <span class="meta">${b.tagline}</span></h3>
     <div class="repgrid">
       ${repRow('하루수익률',`<b class="${sgn(b.daily_return)}">${sd(b.daily_return)}</b>`)}
+      ${repRow('시장 대비(알파)',`<b class="${sgn(b.alpha)}">${sd(b.alpha)}</b> <span class="meta">${b.vs_market||''}</span>`)}
       ${repRow('매도 실현수익률',`<b class="${sgn(b.realized_return)}">${sd(b.realized_return)}</b>`)}
       ${repRow('매도 실현손익',`<b class="${sgn(b.realized_pnl)}">${sm(b.realized_pnl)}</b>`)}
       ${repRow('최종자산',money(b.final_equity))}
@@ -475,13 +499,14 @@ async function openReport(){
   body.innerHTML='<div class="meta"><span class="spin"></span> 보고서 생성 중…</div>';
   const dq=DATE?`&date=${DATE}`:'';
   document.getElementById('repCsv').href=`/api/report?market=${MARKET}&mode=${MODE}${dq}&format=csv`;
+  document.getElementById('repJsonl').href=`/api/report?market=${MARKET}&mode=${MODE}${dq}&format=jsonl`;
   try{
     const r=await fetch(`/api/report?market=${MARKET}&mode=${MODE}${dq}`);
     const rep=await r.json();
     if(rep.error){body.innerHTML=`<div class="err">⚠️ ${rep.error}</div>`; return;}
     const m=rep.meta;
     document.getElementById('repTitle').textContent=`📄 ${m.market_label} · ${m.mode==='prev'?'전날 장':'실시간'} · 세션 ${m.session_date} (${m.n_bars}/${m.total_bars}분)`;
-    body.innerHTML=rep.bots.map(repCard).join('');
+    body.innerHTML=marketBanner(rep.market)+rep.bots.map(repCard).join('');
   }catch(e){body.innerHTML=`<div class="err">오류: ${e}</div>`;}
 }
 document.getElementById('report').onclick=openReport;

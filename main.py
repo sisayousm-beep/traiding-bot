@@ -72,12 +72,20 @@ def run_report(market: str, mode: str, date: str | None = None) -> None:
     vw = _view(market, mode, date, c, sess, is_today)
     c = c.iloc[:vw["k"]]; v = v.iloc[:vw["k"]]
     res = run_intraday(default_bots(), c, v, m["capital"], flatten_eod=vw["flatten"])
-    rep = market_report(res, market, mode, sess, m["capital"], vw)
+    rep = market_report(res, market, mode, sess, m["capital"], vw, closes=c, volumes=v)
     cur = m["currency"]
+    me = rep.get("market", {})
+    if me.get("available"):
+        print(f"\n  🌐 당일 장 평가: {me['regime_label']} ({me['regime_desc']})")
+        print(f"     시장(등가중 매수보유) 하루수익 {_p(me['market_return'])}  "
+              f"고점 {_p(me['peak_gain'])}  저점 {_p(me['trough'])}  "
+              f"상승 {me['n_up']}/{me['n_tickers']}종목  흐름 {me['trend_shape']}")
     print(f"\n  ===== {m['label']} / {mode} / 세션 {sess} — 봇별 결과 보고서 =====")
     for b in rep["bots"]:
         print(f"\n  #{b['rank']} {b['name']}  ({b['tagline']})")
-        print(f"    하루수익 {(_p(b['daily_return']))}  매도실현 {(_p(b['realized_return']))} "
+        print(f"    하루수익 {(_p(b['daily_return']))}  시장대비(알파) {_p(b.get('alpha'))} "
+              f"[{b.get('vs_market','')}]")
+        print(f"    매도실현 {(_p(b['realized_return']))} "
               f"({_money(b['realized_pnl'] or 0, cur)})  최종 {_money(b['final_equity'] or 0, cur)}")
         print(f"    고점 {_p(b['peak_gain'])}  최대낙폭 {_p(b['max_drawdown'])}  분변동성 {_p(b['intraday_vol'])}")
         print(f"    매매 {b['n_trades']}회(라운드트립 {b['n_round_trips']})  승률 {_p(b['win_rate'])}  "

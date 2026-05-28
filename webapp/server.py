@@ -23,7 +23,7 @@ from quantbot import config, live
 from quantbot.intraday_data import load_session, now_market
 from quantbot.intraday_engine import run_intraday
 from quantbot.intraday_metrics import to_payload
-from quantbot.report import market_report, report_to_csv
+from quantbot.report import market_report, report_to_csv, report_to_jsonl
 from quantbot.strategies_intraday import default_bots
 
 app = Flask(__name__)
@@ -111,7 +111,8 @@ def _report(market: str, mode: str, date: str | None = None) -> dict:
             c = c_full.iloc[:k]
             v = v_full.iloc[:k]
             res = run_intraday(default_bots(), c, v, m["capital"], flatten_eod=vw["flatten"])
-            return market_report(res, market, mode, sess, m["capital"], vw)
+            return market_report(res, market, mode, sess, m["capital"], vw,
+                                 closes=c, volumes=v)
         except Exception as e:                       # noqa: BLE001
             traceback.print_exc()
             return {"error": f"보고서 생성 중 오류: {e}", "status": "exception",
@@ -156,11 +157,15 @@ def api_refresh():
 def api_report():
     market, mode, date = _params()
     rep = _report(market, mode, date)
-    if request.args.get("format") == "csv" and "error" not in rep:
+    fmt = request.args.get("format")
+    if fmt in ("csv", "jsonl") and "error" not in rep:
         meta = rep.get("meta", {})
-        fname = f"report_{meta.get('market','')}_{meta.get('mode','')}_{meta.get('session_date','')}.csv"
+        base = f"report_{meta.get('market','')}_{meta.get('mode','')}_{meta.get('session_date','')}"
+        if fmt == "jsonl":                            # AI 학습용 (세션당 봇별 1줄)
+            return Response(report_to_jsonl(rep), mimetype="application/x-ndjson",
+                            headers={"Content-Disposition": f"attachment; filename={base}.jsonl"})
         return Response(report_to_csv(rep), mimetype="text/csv",
-                        headers={"Content-Disposition": f"attachment; filename={fname}"})
+                        headers={"Content-Disposition": f"attachment; filename={base}.csv"})
     return jsonify(rep)
 
 

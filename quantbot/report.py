@@ -3,19 +3,25 @@
 퀀트 트레이딩 개선에 쓰는 자료: FIFO 라운드트립(매수→매도 1쌍) 기준
 승률·손익비·기대값·평균 보유시간·최고/최악 매매·종목별 실현손익·회전율·수수료 등을 뽑는다.
 
-market_report() → {meta, bots:[bot_report ...]}
-report_to_csv()  → 봇 요약 CSV 문자열
+추가로 '당일 장 평가'(market_eval)를 함께 실어, 봇 성과를 시장 그 자체(등가중
+매수보유) 대비 초과수익(알파)으로 맥락화한다 → 상승장에서 번 건지, 진짜 실력인지 구분.
+
+market_report()    → {meta, market, bots:[bot_report ...]}
+report_to_csv()    → 봇 요약 CSV 문자열(시장 평가 헤더 포함)
+report_to_jsonl()  → AI 학습용 JSONL(세션당 봇별 1줄, 시장 국면 + 알파 라벨)
 """
 from __future__ import annotations
 
 import csv
 import io
+import json
 
 import pandas as pd
 
 from . import config
 from .intraday_engine import IntradayResult
 from .intraday_metrics import _clean, metrics
+from .market_eval import evaluate_market
 
 NAME = config.display_name
 
@@ -140,13 +146,51 @@ def bot_report(r: IntradayResult, capital: float) -> dict:
     }
 
 
+def _vs_market(daily_return, market_return) -> tuple[float | None, str]:
+    """봇 수익률을 시장(등가중 매수보유) 대비로 평가 → (알파, 한 줄 라벨).
+
+    핵심: 절대 수익보다 '시장 대비'가 실력에 가깝다.
+      - 하락장에서 플러스 = 진짜 실력
+      - 상승장에서 플러스지만 시장보다 낮음 = 시장 덕(언더퍼폼)
+    """
+    if daily_return is None or market_return is None:
+        return None, "평가불가"
+    alpha = daily_return - market_return
+    beat = alpha > 0
+    if market_return <= -0.001:                       # 하락장
+        if daily_return > 0:
+            return alpha, "하락장 방어 후 플러스 — 진짜 실력"
+        return alpha, ("하락장에서 시장보다 선방(손실 축소)" if beat
+                       else "하락장에서 시장보다 더 큰 손실")
+    if market_return >= 0.001:                         # 상승장
+        if daily_return <= 0:
+            return alpha, "상승장인데 손실 — 전략 결함 의심"
+        return alpha, ("상승장에서 시장 초과수익(알파)" if beat
+                       else "상승장 덕에 벌었으나 시장에 못 미침")
+    return alpha, ("보합장에서 초과수익(알파)" if beat else "보합장에서 시장 하회")
+
+
 def market_report(results: list[IntradayResult], market: str, mode: str,
-                  session_date, capital: float, view: dict | None = None) -> dict:
+                  session_date, capital: float, view: dict | None = None,
+                  closes: pd.DataFrame | None = None,
+                  volumes: pd.DataFrame | None = None) -> dict:
     m = config.MARKETS[market]
     bots = [bot_report(r, capital) for r in results]
     bots.sort(key=lambda d: (d["daily_return"] is None, -(d["daily_return"] or -9e9)))
     for i, b in enumerate(bots):
         b["rank"] = i + 1
+
+    market_eval = {"available": False}
+    if closes is not None and not closes.empty:
+        market_eval = evaluate_market(closes, volumes, market, session_date, capital)
+
+    mret = market_eval.get("market_return") if market_eval.get("available") else None
+    for b in bots:                                    # 봇별 시장 대비(알파) 부여
+        alpha, label = _vs_market(b.get("daily_return"), mret)
+        b["alpha"] = _clean(alpha)
+        b["beat_market"] = (alpha > 0) if alpha is not None else None
+        b["vs_market"] = label
+
     return {
         "meta": {
             "market": market, "market_label": m["label"], "market_short": m["short"],
@@ -155,13 +199,15 @@ def market_report(results: list[IntradayResult], market: str, mode: str,
             "view_label": (view or {}).get("label"),
             "n_bars": (view or {}).get("k"), "total_bars": (view or {}).get("total"),
         },
+        "market": market_eval,
         "bots": bots,
     }
 
 
 _CSV_COLS = [
     ("rank", "순위"), ("name", "봇"), ("tagline", "전략"), ("leverage", "레버리지"),
-    ("daily_return", "하루수익률"), ("realized_return", "매도실현수익률"),
+    ("daily_return", "하루수익률"), ("alpha", "시장대비(알파)"), ("vs_market", "시장대비평가"),
+    ("realized_return", "매도실현수익률"),
     ("realized_pnl", "매도실현손익"), ("peak_gain", "고점"), ("max_drawdown", "최대낙폭"),
     ("intraday_vol", "분변동성"), ("win_minutes", "상승분비율"),
     ("n_trades", "총매매"), ("n_round_trips", "라운드트립"),
@@ -173,6 +219,25 @@ _CSV_COLS = [
 ]
 
 
+def _market_summary_rows(report: dict) -> list[list]:
+    """CSV 상단에 당일 장 평가를 요약 행으로 깔아둔다."""
+    me = report.get("market", {})
+    if not me.get("available"):
+        return [["# 당일 장 평가: 데이터 없음"]]
+    bt, wt = me.get("best_ticker") or {}, me.get("worst_ticker") or {}
+    return [
+        [f"# 당일 장 평가: {me.get('regime_label','')} ({me.get('regime_desc','')})"],
+        [f"# 시장(등가중 매수보유) 하루수익률={me.get('market_return')}",
+         f"고점={me.get('peak_gain')}", f"저점={me.get('trough')}",
+         f"최대낙폭={me.get('max_drawdown')}"],
+        [f"# 상승종목={me.get('n_up')}/{me.get('n_tickers')}",
+         f"하락종목={me.get('n_down')}", f"상승폭비율(breadth)={me.get('breadth_up')}",
+         f"장흐름={me.get('trend_shape')}"],
+        [f"# 최고종목={bt.get('name','')}({bt.get('return')})",
+         f"최악종목={wt.get('name','')}({wt.get('return')})"],
+    ]
+
+
 def report_to_csv(report: dict) -> str:
     """봇 요약을 CSV 문자열로. Excel 한글 인식을 위해 BOM 포함."""
     buf = io.StringIO()
@@ -180,7 +245,67 @@ def report_to_csv(report: dict) -> str:
     w = csv.writer(buf)
     meta = report.get("meta", {})
     w.writerow([f"# {meta.get('market_label','')} / {meta.get('mode','')} / 세션 {meta.get('session_date','')}"])
+    for row in _market_summary_rows(report):
+        w.writerow(row)
+    w.writerow([])
     w.writerow([h for _, h in _CSV_COLS])
     for b in report.get("bots", []):
         w.writerow([b.get(k) for k, _ in _CSV_COLS])
     return buf.getvalue()
+
+
+# AI 학습용으로 내보낼 봇 특성(피처) — 모두 수치/범주형 평탄화.
+_FEATURE_KEYS = [
+    "daily_return", "realized_return", "peak_gain", "max_drawdown",
+    "intraday_vol", "win_minutes", "n_trades", "n_round_trips",
+    "win_rate", "profit_factor", "expectancy", "avg_win", "avg_loss",
+    "avg_hold_min", "max_hold_min", "turnover", "total_commission",
+    "leverage", "alpha",
+]
+
+
+def report_to_jsonl(report: dict) -> str:
+    """AI 학습용 JSONL — 세션당 봇별 1줄.
+
+    각 줄은 {시장 국면(맥락) + 봇 피처 + 라벨}로 구성된다. 라벨은 '시장 대비
+    초과수익을 냈는가(beat_market)'와 '시장 대비 평가 문구(vs_market)'로,
+    상승장 덕에 번 봇과 진짜 실력 봇을 모델이 구분 학습할 수 있게 한다.
+    """
+    meta = report.get("meta", {})
+    me = report.get("market", {})
+    market_ctx = {
+        "regime": me.get("regime"),
+        "regime_label": me.get("regime_label"),
+        "market_return": me.get("market_return"),
+        "market_peak_gain": me.get("peak_gain"),
+        "market_max_drawdown": me.get("max_drawdown"),
+        "market_index_vol": me.get("index_vol"),
+        "breadth_up": me.get("breadth_up"),
+        "n_up": me.get("n_up"), "n_down": me.get("n_down"),
+        "n_tickers": me.get("n_tickers"),
+        "trend_shape": me.get("trend_shape"),
+        "morning_return": me.get("morning_return"),
+        "afternoon_return": me.get("afternoon_return"),
+    } if me.get("available") else {"regime": None}
+
+    lines = []
+    for b in report.get("bots", []):
+        rec = {
+            "session_date": meta.get("session_date"),
+            "market": meta.get("market"),
+            "mode": meta.get("mode"),
+            "bot": b.get("name"),
+            "strategy": b.get("tagline"),
+            "bankrupt": b.get("bankrupt"),
+            "rank": b.get("rank"),
+            "market_context": market_ctx,
+            "features": {k: b.get(k) for k in _FEATURE_KEYS},
+            "label": {
+                "beat_market": b.get("beat_market"),
+                "alpha": b.get("alpha"),
+                "vs_market": b.get("vs_market"),
+                "daily_return": b.get("daily_return"),
+            },
+        }
+        lines.append(json.dumps(rec, ensure_ascii=False))
+    return "\n".join(lines) + ("\n" if lines else "")
