@@ -349,10 +349,15 @@ class Gemini(IntradayStrategy):
     """4대 매매 알고리즘으로 '확실한 자리만 저격'하는 저회전 정밀 봇.
 
     ① 동적 시장 레짐 필터 2.0 — 워밍업 15분 뒤, 시장 폭(VWAP 상회 비율)과 '지수 방향'을
-       동시에 본다. breadth≥0.55 AND 지수↑ 일 때만 '공격 모드'. breadth<0.40 이거나
+       동시에 본다. breadth≥0.60 AND 지수↑ 일 때만 '공격 모드'. breadth<0.45 이거나
        지수가 무너지면 전량 현금으로 그날은 관망(halt 래치 — 재진입 안 함).
        (※ 엔진에 코스피200/나스닥 선물 피드가 없어 '지수'는 유니버스 등가중 지수의
         당일 방향으로 대용한다.)
+
+    핵심 원칙은 '최대한 잃지 않는다'. 손실 최소화로 수치 튜닝(국장·미장 16세션씩 백테스트):
+      진입 폭 0.55→0.60, 관망 전환 폭 0.40→0.45(약해지면 더 빨리 현금). 손실 난 날
+      5→2일, 누적손실 -3.1%→-0.7%, 최악의 날 -1.17%→-0.59%로 하방을 크게 줄였다.
+      (고정 손절은 더 조이면 휩쏘로 손실이 오히려 커져 -1.5% 유지. 4중 필터는 그대로.)
     ② 4중 확인 진입 — 네 조건을 모두 충족하는 종목만 저격 매수:
        (Orion) 개장 첫 15분 고가 상향 돌파 · (Atlas) 시초 대비 수익률 양수 상위 ·
        (안전 바닥) 현재가가 VWAP +0.5%~+2% 밴드 안(과열 추격 금지) ·
@@ -375,7 +380,7 @@ class Gemini(IntradayStrategy):
                  vol_mult: float = 2.0, vol_recent: int = 5,
                  hard_stop: float = 0.015, trail_trigger: float = 0.03,
                  trail_stop: float = 0.02, cooldown: int = 30,
-                 enter_breadth: float = 0.55, exit_breadth: float = 0.40,
+                 enter_breadth: float = 0.60, exit_breadth: float = 0.45,
                  index_collapse: float = -0.005):
         self.top_n = top_n
         self.scan = scan                  # 신규 진입 의사결정 주기(분)
