@@ -33,14 +33,21 @@ def _money(v, cur):
     return (("₩" if cur == "₩" else "$") + f"{round(v):,}")
 
 
-def run_once(market: str, mode: str) -> None:
+def _view(market, mode, date, c, sess, is_today):
+    if date:
+        vw = live.view(market, "today" if is_today else "prev", c, sess, is_today)
+        return vw if is_today else {**vw, "label": f"📅 {sess} 지난 장(날짜 선택)"}
+    return live.view(market, mode, c, sess, is_today)
+
+
+def run_once(market: str, mode: str, date: str | None = None) -> None:
     m = config.MARKETS[market]
-    print(f"[{dt.datetime.now():%H:%M:%S}] {m['short']}/{mode} — 1분봉 로딩…")
-    c, v, sess, status, is_today = load_session(market, mode)
+    print(f"[{dt.datetime.now():%H:%M:%S}] {m['short']}/{mode}{' '+date if date else ''} — 1분봉 로딩…")
+    c, v, sess, status, is_today = load_session(market, mode, date=date)
     if status != "ok":
         print(f"  데이터 없음({status}). {m['label']} 개장(한국시간) {m['open_kst']}~{m['close_kst']}.")
         return
-    vw = live.view(market, mode, c, sess, is_today)
+    vw = _view(market, mode, date, c, sess, is_today)
     c = c.iloc[:vw["k"]]; v = v.iloc[:vw["k"]]
     res = run_intraday(default_bots(), c, v, m["capital"], flatten_eod=vw["flatten"])
     cur = m["currency"]
@@ -55,14 +62,14 @@ def run_once(market: str, mode: str) -> None:
               f"{r['tagline']}{bust}")
 
 
-def run_report(market: str, mode: str) -> None:
+def run_report(market: str, mode: str, date: str | None = None) -> None:
     m = config.MARKETS[market]
-    print(f"[{dt.datetime.now():%H:%M:%S}] {m['short']}/{mode} — 결과 보고서 생성…")
-    c, v, sess, status, is_today = load_session(market, mode)
+    print(f"[{dt.datetime.now():%H:%M:%S}] {m['short']}/{mode}{' '+date if date else ''} — 결과 보고서 생성…")
+    c, v, sess, status, is_today = load_session(market, mode, date=date)
     if status != "ok":
         print(f"  데이터 없음({status}).")
         return
-    vw = live.view(market, mode, c, sess, is_today)
+    vw = _view(market, mode, date, c, sess, is_today)
     c = c.iloc[:vw["k"]]; v = v.iloc[:vw["k"]]
     res = run_intraday(default_bots(), c, v, m["capital"], flatten_eod=vw["flatten"])
     rep = market_report(res, market, mode, sess, m["capital"], vw)
@@ -101,22 +108,23 @@ def main() -> None:
     ap.add_argument("--mode", choices=["prev", "today"], default="today")
     ap.add_argument("--live", action="store_true", help="반복 갱신(실시간/리플레이)")
     ap.add_argument("--report", action="store_true", help="봇별 결과 보고서 출력 + CSV 저장")
+    ap.add_argument("--date", default=None, help="지난 날짜 선택(YYYY-MM-DD, 최근 30일 내)")
     ap.add_argument("--interval", type=int, default=30)
     args = ap.parse_args()
 
     if args.report:
-        run_report(args.market, args.mode)
+        run_report(args.market, args.mode, args.date)
     elif args.live:
         print(f"실시간 모드({args.market}/{args.mode}). Ctrl+C로 종료.")
         try:
             while True:
-                run_once(args.market, args.mode)
+                run_once(args.market, args.mode, args.date)
                 print("=" * 72)
                 time.sleep(args.interval)
         except KeyboardInterrupt:
             print("\n종료.")
     else:
-        run_once(args.market, args.mode)
+        run_once(args.market, args.mode, args.date)
 
 
 if __name__ == "__main__":

@@ -55,6 +55,9 @@
   #autostat{font-size:12px;font-weight:600;white-space:nowrap;}
   #autostat.on{color:var(--green);}
   #autostat.off{color:var(--muted);}
+  .datesel{display:inline-flex;align-items:center;gap:5px;}
+  .datesel input[type=date]{background:var(--panel);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 6px;color-scheme:dark;}
+  .datesel button.mini{background:transparent;color:var(--muted);border:1px solid var(--border);border-radius:6px;cursor:pointer;padding:3px 7px;font-size:11px;}
   #livectl{display:inline-flex;align-items:center;gap:10px;}
   .tlctl{display:none;align-items:center;gap:8px;}
   .tlctl.show{display:inline-flex;}
@@ -87,6 +90,7 @@
   <h1>⚡ 당일 단타 봇 경쟁</h1>
   <div class="seg mkt" id="mkt"><button data-v="kr" class="on">국장</button><button data-v="us">미장</button><button data-v="kr_hot">국장🔥급등</button><button data-v="us_hot">미장🔥급등</button></div>
   <div class="seg" id="mode"><button data-v="today" class="on">실시간</button><button data-v="prev">전날 장</button></div>
+  <label class="datesel">📅 날짜 <input type="date" id="datepick"><button id="dateclear" class="mini" title="날짜 해제">✕</button></label>
   <div class="meta" id="meta">로딩 중…</div>
   <div class="controls">
     <span id="status"></span>
@@ -135,11 +139,13 @@
 </div>
 
 <script>
-const COLORS={Atlas:'#58a6ff',Nova:'#3fb950',Orion:'#e3b341',Vega:'#bc8cff','Titan-3X':'#f85149',Sol:'#8b949e'};
+const COLORS={Atlas:'#58a6ff',Nova:'#3fb950',Orion:'#e3b341',Vega:'#bc8cff','Titan-3X':'#f85149',Claude:'#ff8c42',Sol:'#8b949e'};
 const SCOL=['#58a6ff','#3fb950','#e3b341','#bc8cff','#f85149','#39c5cf','#db61a2','#ff7b72','#a5d6ff','#ffa657','#7ee787','#d2a8ff','#f0883e','#56d4dd'];
 let DATA=null, MARKET='kr', MODE='today', autoTimer=null, countdownTimer=null, TRADEBOT=null;
 let AUTO_BUSY=false, nextRefreshAt=0;
 let FULL=null, tlIdx=0, tlTimer=null, tlPlaying=false;  // 타임랩스 상태(클라이언트 재생)
+let DATE='';                                            // 선택 날짜(YYYY-MM-DD), 비면 mode 기준
+const isPrevLike=()=>MODE==='prev'||!!DATE;             // 전날/지난날짜 = 타임랩스 가능
 const MAIN_HTML=document.getElementById('main').innerHTML;
 const col=n=>COLORS[n]||'#58a6ff';
 const cur=()=>(DATA&&DATA.meta&&DATA.meta.currency)||'$';
@@ -255,10 +261,11 @@ async function load(refresh){
   const btn=document.getElementById('refresh'),st=document.getElementById('status');
   btn.disabled=true; st.innerHTML='<span class="spin"></span> '+(refresh?'시세 수신…':'로딩…');
   try{
-    const res=await fetch(`/api/${refresh?'refresh':'results'}?market=${MARKET}&mode=${MODE}`,{method:refresh?'POST':'GET'});
+    const dq=DATE?`&date=${DATE}`:'';
+    const res=await fetch(`/api/${refresh?'refresh':'results'}?market=${MARKET}&mode=${MODE}${dq}`,{method:refresh?'POST':'GET'});
     if(!res.ok) throw new Error('HTTP '+res.status);
     DATA=await res.json(); render(); st.textContent='';
-    if(MODE==='prev' && !DATA.error){ FULL=DATA; tlIdx=tlMaxIdx(); syncTLBar(); }
+    if(isPrevLike() && !DATA.error){ FULL=DATA; tlIdx=tlMaxIdx(); syncTLBar(); }
     return true;
   }catch(e){st.textContent='오류: '+e; console.error('[로드 실패]',e); return false;}
   finally{btn.disabled=false;}
@@ -267,17 +274,28 @@ function bindSeg(id,setter){document.querySelectorAll('#'+id+' button').forEach(
   document.querySelectorAll('#'+id+' button').forEach(x=>x.classList.remove('on'));
   b.classList.add('on'); setter(b.dataset.v); load(false);});}
 bindSeg('mkt',v=>{MARKET=v; tlStop();});
-bindSeg('mode',v=>{MODE=v; applyMode();});
+bindSeg('mode',v=>{MODE=v; DATE=''; document.getElementById('datepick').value=''; applyMode();});
 document.getElementById('refresh').onclick=()=>load(true);
 
-// ---- 모드 전환: today=자동갱신 / prev=타임랩스(갱신과 완전 별개) ----
+// 날짜 선택: 지난 날을 고르면 전날 장처럼(완료 세션·타임랩스 가능) 본다
+(function initDate(){
+  const dp=document.getElementById('datepick'); const today=new Date();
+  const iso=d=>d.toISOString().slice(0,10);
+  dp.max=iso(today);
+  const min=new Date(today); min.setDate(min.getDate()-29); dp.min=iso(min);  // yfinance 1분봉 ~30일
+})();
+document.getElementById('datepick').onchange=e=>{ if(!e.target.value)return;
+  DATE=e.target.value; applyMode(); load(false); };
+document.getElementById('dateclear').onclick=()=>{ DATE=''; document.getElementById('datepick').value=''; applyMode(); load(false); };
+
+// ---- 모드 전환: 실시간=자동갱신 / 전날·지난날짜=타임랩스(갱신과 완전 별개) ----
 function applyMode(){
-  const prev=MODE==='prev';
+  const prev=isPrevLike();
   document.getElementById('livectl').style.display=prev?'none':'inline-flex';
   document.getElementById('tlctl').classList.toggle('show',prev);
   tlStop();
-  document.getElementById('auto').checked=!prev; setupAuto();   // 전날 장이면 자동 갱신 OFF
-  if(prev) autoLog('전날 장 모드 — 자동 갱신 끔, 🎬 타임랩스 재생 사용 가능');
+  document.getElementById('auto').checked=!prev; setupAuto();   // 전날/지난날짜면 자동 갱신 OFF
+  if(prev) autoLog('완료 세션 모드 — 자동 갱신 끔, 🎬 타임랩스 재생 사용 가능');
 }
 
 // ===== 🎬 타임랩스: 전날 세션을 1회만 받아두고 클라이언트에서 부드럽게 재생 =====
@@ -455,9 +473,10 @@ async function openReport(){
   const modal=document.getElementById('reportModal'), body=document.getElementById('repBody');
   modal.classList.add('show');
   body.innerHTML='<div class="meta"><span class="spin"></span> 보고서 생성 중…</div>';
-  document.getElementById('repCsv').href=`/api/report?market=${MARKET}&mode=${MODE}&format=csv`;
+  const dq=DATE?`&date=${DATE}`:'';
+  document.getElementById('repCsv').href=`/api/report?market=${MARKET}&mode=${MODE}${dq}&format=csv`;
   try{
-    const r=await fetch(`/api/report?market=${MARKET}&mode=${MODE}`);
+    const r=await fetch(`/api/report?market=${MARKET}&mode=${MODE}${dq}`);
     const rep=await r.json();
     if(rep.error){body.innerHTML=`<div class="err">⚠️ ${rep.error}</div>`; return;}
     const m=rep.meta;

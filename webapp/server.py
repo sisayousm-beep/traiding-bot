@@ -20,7 +20,7 @@ from flask import Flask, jsonify, render_template, request
 from flask import Response
 
 from quantbot import config, live
-from quantbot.intraday_data import load_session
+from quantbot.intraday_data import load_session, now_market
 from quantbot.intraday_engine import run_intraday
 from quantbot.intraday_metrics import to_payload
 from quantbot.report import market_report, report_to_csv
@@ -35,26 +35,35 @@ _session_cache: dict = {}
 _SESSION_TTL = 1800.0          # prev 세션 캐시 유효시간(초)
 
 
-def _load_session_cached(market: str, mode: str):
-    """today는 항상 새로 받고(실시간), prev는 캐시(타임랩스 재생용)."""
-    if mode != "prev":
-        return load_session(market, mode)
-    key = (market, mode)
-    ent = _session_cache.get(key)
-    if ent and (time.time() - ent[0]) < _SESSION_TTL:
-        return ent[1]
-    data = load_session(market, mode)
-    if data[3] == "ok":        # status == ok 일 때만 캐시
+def _load_session_cached(market: str, mode: str, date: str | None = None):
+    """완료된 세션(전날 prev / 지난 날짜 선택)은 캐시, 오늘(실시간)은 항상 새로 받는다."""
+    today = now_market(market).date()
+    is_static = (date is not None and dt.date.fromisoformat(date) < today) or \
+                (date is None and mode == "prev")
+    key = (market, mode, str(date))
+    if is_static:
+        ent = _session_cache.get(key)
+        if ent and (time.time() - ent[0]) < _SESSION_TTL:
+            return ent[1]
+    data = load_session(market, mode, date=date)
+    if is_static and data[3] == "ok":
         _session_cache[key] = (time.time(), data)
     return data
 
 
-def _compute(market: str, mode: str, upto: int | None = None) -> dict:
-    """시세 재수신 + 재계산. 어떤 오류가 나도 절대 예외를 밖으로 던지지 않고
-    항상 JSON 페이로드를 돌려준다(자동 갱신 루프가 멈추지 않도록).
+def _view_for(market, mode, date, c_full, sess, is_today):
+    """선택 날짜가 있으면 그 날의 완료 세션(또는 오늘이면 실시간)으로 뷰를 만든다."""
+    if date is not None:
+        vw = live.view(market, "today" if is_today else "prev", c_full, sess, is_today)
+        if not is_today:
+            vw = {**vw, "kind": "date", "label": f"📅 {sess} — 지난 장 (날짜 선택)"}
+        return vw
+    return live.view(market, mode, c_full, sess, is_today)
 
-    upto: prev 모드 타임랩스용. '세션 첫 upto분까지'만 노출해 그 시점 상태를 재현한다.
-    """
+
+def _compute(market: str, mode: str, date: str | None = None) -> dict:
+    """시세 재수신 + 재계산. 어떤 오류가 나도 절대 예외를 밖으로 던지지 않고
+    항상 JSON 페이로드를 돌려준다(자동 갱신 루프가 멈추지 않도록)."""
     ts = dt.datetime.now().strftime("%H:%M:%S")
     with _lock:
         m = config.MARKETS[market]
@@ -62,29 +71,21 @@ def _compute(market: str, mode: str, upto: int | None = None) -> dict:
                      "market_short": m["short"], "mode": mode,
                      "open_kst": m["open_kst"], "close_kst": m["close_kst"]}
         try:
-            c_full, v_full, sess, status, is_today = _load_session_cached(market, mode)
+            c_full, v_full, sess, status, is_today = _load_session_cached(market, mode, date)
             if status != "ok":
-                msg = {"no_session": "직전 세션 데이터가 아직 없습니다(주말/연휴/장 시작 전).",
+                msg = {"no_session": "해당 날짜/세션 데이터가 없습니다(주말/연휴/장 시작 전, 또는 30일 초과).",
                        "no_data": "해당 세션 1분봉을 받지 못했습니다."}.get(status, status)
-                print(f"[{ts}] 갱신 {market}/{mode} → status={status} (데이터 없음)", flush=True)
+                print(f"[{ts}] 갱신 {market}/{mode} date={date} → status={status} (데이터 없음)", flush=True)
                 payload = {"error": msg, "status": status,
                            "meta": {**meta_base, "session_date": str(sess) if sess else None}}
             else:
-                vw = live.view(market, mode, c_full, sess, is_today)
-                # 타임랩스: prev 모드에서 upto가 오면 '첫 upto분'으로 클리핑
-                if mode == "prev" and upto is not None:
-                    total = vw["total"]
-                    k = max(2, min(int(upto), total))
-                    vw = {**vw, "k": k, "flatten": k >= total,
-                          "kind": "timelapse",
-                          "label": ("📼 타임랩스 — 전날 장 재생"
-                                    if k < total else "✅ 전날 장 — 종료(종가 청산)")}
+                vw = _view_for(market, mode, date, c_full, sess, is_today)
                 k = vw["k"]
                 c = c_full.iloc[:k]
                 v = v_full.iloc[:k]
                 res = run_intraday(default_bots(), c, v, m["capital"], flatten_eod=vw["flatten"])
                 payload = to_payload(res, c, sess, market, mode, m["capital"], vw)
-                print(f"[{ts}] 갱신 {market}/{mode} → {vw['kind']} {k}/{vw['total']}분 (정상)",
+                print(f"[{ts}] 갱신 {market}/{mode} date={date} → {vw['kind']} {k}/{vw['total']}분 (정상)",
                       flush=True)
         except Exception as e:                       # noqa: BLE001 — 루프 보호용 광범위 캐치
             traceback.print_exc()
@@ -96,16 +97,16 @@ def _compute(market: str, mode: str, upto: int | None = None) -> dict:
         return payload
 
 
-def _report(market: str, mode: str) -> dict:
-    """현재 보이는 세션(실시간 클립 또는 전날 전체)에 대한 봇별 분석 보고서."""
+def _report(market: str, mode: str, date: str | None = None) -> dict:
+    """현재 보이는 세션(실시간 클립 / 전날 / 선택 날짜)에 대한 봇별 분석 보고서."""
     with _lock:
         m = config.MARKETS[market]
         try:
-            c_full, v_full, sess, status, is_today = _load_session_cached(market, mode)
+            c_full, v_full, sess, status, is_today = _load_session_cached(market, mode, date)
             if status != "ok":
                 return {"error": "세션 데이터가 없어 보고서를 만들 수 없습니다.", "status": status,
                         "meta": {"market": market, "mode": mode}}
-            vw = live.view(market, mode, c_full, sess, is_today)
+            vw = _view_for(market, mode, date, c_full, sess, is_today)
             k = vw["k"]
             c = c_full.iloc[:k]
             v = v_full.iloc[:k]
@@ -123,14 +124,15 @@ def _params():
         market = config.DEFAULT_MARKET
     mode = request.args.get("mode", "today")
     mode = mode if mode in ("prev", "today") else "today"
-    upto_raw = request.args.get("upto")
-    upto = None
-    if upto_raw is not None:
+    date = request.args.get("date")
+    if date:
         try:
-            upto = int(upto_raw)
+            dt.date.fromisoformat(date)        # YYYY-MM-DD 검증
         except (TypeError, ValueError):
-            upto = None
-    return market, mode, upto
+            date = None
+    else:
+        date = None
+    return market, mode, date
 
 
 @app.route("/")
@@ -140,20 +142,20 @@ def index():
 
 @app.route("/api/results")
 def api_results():
-    market, mode, upto = _params()
-    return jsonify(_compute(market, mode, upto))
+    market, mode, date = _params()
+    return jsonify(_compute(market, mode, date))
 
 
 @app.route("/api/refresh", methods=["POST"])
 def api_refresh():
-    market, mode, upto = _params()
-    return jsonify(_compute(market, mode, upto))
+    market, mode, date = _params()
+    return jsonify(_compute(market, mode, date))
 
 
 @app.route("/api/report")
 def api_report():
-    market, mode, _ = _params()
-    rep = _report(market, mode)
+    market, mode, date = _params()
+    rep = _report(market, mode, date)
     if request.args.get("format") == "csv" and "error" not in rep:
         meta = rep.get("meta", {})
         fname = f"report_{meta.get('market','')}_{meta.get('mode','')}_{meta.get('session_date','')}.csv"
