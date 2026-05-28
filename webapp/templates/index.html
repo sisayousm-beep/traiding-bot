@@ -108,6 +108,7 @@
     </span>
     <button class="act" id="report">📄 보고서</button>
     <button class="act" id="ranking">🏆 종합랭킹</button>
+    <button class="act" id="score">🎯 성능점수</button>
     <button class="act" id="refresh">갱신</button>
   </div>
 </header>
@@ -166,6 +167,36 @@
         <div class="meta" style="margin-top:8px;">※ 랭킹은 세션마다 봇끼리의 순위(1~N)와 하루수익률을 모아 <b>평균</b>냅니다. 평균 순위가 낮을수록(=항상 상위권) 좋은 봇. 시장을 여러 개 고르면 그 시장들의 모든 거래일을 합쳐 평균냅니다.</div>
       </div>
       <div id="rankBody"></div>
+    </div>
+  </div>
+</div>
+
+<div id="scoreModal" class="modal">
+  <div class="modal-box">
+    <div class="modal-head">
+      <h2 id="scoreTitle">🎯 봇 성능점수 <span class="meta">(그날 장 상황을 보정한 실력 점수)</span></h2>
+      <span class="grow"></span>
+      <button class="act" id="scoreClose">닫기 ✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="repcard">
+        <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:center;">
+          <div class="seg" id="scoreGroup">
+            <button data-v="normal" class="on">일반 (국장+미장)</button>
+            <button data-v="hot">급등 (국장🔥+미장🔥)</button>
+          </div>
+          <label>기간(일) <input type="number" id="scoreDays" value="7" min="2" max="30" style="width:64px;background:var(--panel);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:5px;"></label>
+          <button class="act" id="scoreRun">🎯 점수 계산</button>
+        </div>
+        <div class="meta" style="margin-top:8px;line-height:1.6;">
+          <b>성능점수</b> = 50 + 50·tanh( 평균알파 · (0.5+시장승률) / 0.02 ) ·
+          <b>50점 = 그날 시장과 똑같음(실력 0)</b>. 위로 갈수록 시장을 보정하고도 잘한 것.<br>
+          ※ <b>알파</b> = 봇 하루수익 − 그날 시장(등가중 매수보유) 수익. 상승장 덕에 번 건 빼고 본 실력입니다.
+          시장승률(며칠 이겼나)을 곱해 하루 운으로 번 봇은 깎습니다. 청산 이력이 있으면 상한 30점.<br>
+          우량주와 급등주는 성격이 달라 <b>두 그룹을 따로</b> 평가합니다.
+        </div>
+      </div>
+      <div id="scoreBody"></div>
     </div>
   </div>
 </div>
@@ -605,6 +636,59 @@ document.querySelectorAll('.rmkt').forEach(c=>c.onchange=syncBulkLinks);
 document.getElementById('rankDays').onchange=syncBulkLinks;
 document.getElementById('rankClose').onclick=()=>document.getElementById('rankModal').classList.remove('show');
 document.getElementById('rankModal').onclick=e=>{if(e.target.id==='rankModal')e.target.classList.remove('show');};
+
+// ===== 🎯 성능점수 모달 (그날 장 보정 실력 점수) =====
+let SCORE_GROUP='normal';
+function scoreColor(s){if(s==null)return 'var(--muted)';
+  if(s>=65)return 'var(--green)'; if(s>=50)return '#56d364';
+  if(s>=40)return 'var(--gold)'; if(s>=25)return 'var(--accent)'; return 'var(--red)';}
+function scoreTable(rep){
+  const sd=v=>v==null?'–':(v>=0?'+':'')+pct(v);
+  const num=(v,d=2)=>v==null?'–':(+v).toFixed(d);
+  const head=`<div class="meta" style="margin-bottom:8px;">
+    대상 ${rep.meta.market_labels.join(' + ')} · ${rep.meta.n_sessions}개 세션
+    (${rep.meta.date_from||'?'} ~ ${rep.meta.date_to||'?'})</div>`;
+  if(!rep.bots||!rep.bots.length) return head+'<div class="err">집계할 완료 세션이 없습니다. 기간을 늘려보세요.</div>';
+  const rows=rep.bots.map(b=>{
+    const medal=['🥇','🥈','🥉'][b.rank-1]||('#'+b.rank);
+    const lv=b.leverage>1?` <span class="lev">${b.leverage}x</span>`:'';
+    const bust=b.bankrupt_count>0?` <span class="lev bust">청산${b.bankrupt_count}</span>`:'';
+    return `<tr>
+      <td>${medal}</td>
+      <td class="l">${b.name}${lv}${bust}<br><span class="meta">${b.tagline||''}</span></td>
+      <td><b style="font-size:18px;color:${scoreColor(b.score)}">${b.score==null?'–':b.score}</b></td>
+      <td class="${sgn(b.avg_alpha)}">${sd(b.avg_alpha)}</td>
+      <td class="${sgn(b.avg_return)}">${sd(b.avg_return)}</td>
+      <td class="${sgn(b.avg_market_return)}">${sd(b.avg_market_return)}</td>
+      <td>${b.beat_rate==null?'–':pct(b.beat_rate)}</td>
+      <td>${num(b.info_ratio)}</td>
+      <td>${b.n_sessions}</td></tr>`;
+  }).join('');
+  return head+`<div class="repcard"><table>
+    <thead><tr><th>순위</th><th class="l">봇</th><th>성능점수</th><th>평균알파</th>
+      <th>평균수익</th><th>그날시장</th><th>시장승률</th><th>정보비율</th><th>세션수</th></tr></thead>
+    <tbody>${rows}</tbody></table>
+    <div class="meta" style="margin-top:7px;">평균알파=시장 빼고 본 실력 · 그날시장=세션 평균 시장수익 · 시장승률=시장 이긴 날 비율 · 정보비율=평균알파/알파변동(클수록 운 아닌 실력)</div></div>`;
+}
+async function runScore(){
+  const body=document.getElementById('scoreBody');
+  const days=Math.max(2,Math.min(30,+document.getElementById('scoreDays').value||7));
+  body.innerHTML='<div class="meta"><span class="spin"></span> 두 시장의 한 주치 세션 수신·시뮬레이션 중… (수십 초 걸릴 수 있어요)</div>';
+  try{
+    const r=await fetch(`/api/score?group=${SCORE_GROUP}&days=${days}`);
+    const rep=await r.json();
+    if(rep.error){body.innerHTML=`<div class="err">⚠️ ${rep.error}</div>`;return;}
+    body.innerHTML=scoreTable(rep);
+  }catch(e){body.innerHTML=`<div class="err">오류: ${e}</div>`;}
+}
+document.querySelectorAll('#scoreGroup button').forEach(b=>b.onclick=()=>{
+  document.querySelectorAll('#scoreGroup button').forEach(x=>x.classList.remove('on'));
+  b.classList.add('on'); SCORE_GROUP=b.dataset.v; runScore();});
+document.getElementById('score').onclick=()=>{
+  document.getElementById('scoreModal').classList.add('show'); runScore();};
+document.getElementById('scoreRun').onclick=runScore;
+document.getElementById('scoreClose').onclick=()=>document.getElementById('scoreModal').classList.remove('show');
+document.getElementById('scoreModal').onclick=e=>{if(e.target.id==='scoreModal')e.target.classList.remove('show');};
 
 load(false); setupAuto();
 </script>

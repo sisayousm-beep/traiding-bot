@@ -24,7 +24,7 @@ from quantbot.intraday_data import load_session, now_market
 from quantbot.intraday_engine import run_intraday
 from quantbot.intraday_metrics import to_payload
 from quantbot.report import (
-    bulk_reports, market_report, ranking_report,
+    bulk_reports, market_report, ranking_report, score_report,
     report_to_csv, report_to_jsonl, reports_to_flat_csv, reports_to_jsonl,
 )
 from quantbot.strategies_intraday import default_bots
@@ -201,6 +201,25 @@ def api_ranking():
         except Exception as e:                       # noqa: BLE001
             traceback.print_exc()
             return jsonify({"error": f"랭킹 생성 중 오류: {e}", "status": "exception"})
+
+
+@app.route("/api/score")
+def api_score():
+    """시장 보정 성능점수. group=normal(국장+미장) | hot(급등 국장+미장)."""
+    group = request.args.get("group", "normal")
+    if group not in ("normal", "hot"):
+        group = "normal"
+    days = _days_param(7)
+    ts = dt.datetime.now().strftime("%H:%M:%S")
+    with _lock:
+        try:
+            rep = score_report(group, days=days)
+            print(f"[{ts}] 성능점수 {group} {days}일 → {rep.get('meta',{}).get('n_sessions')}세션",
+                  flush=True)
+            return jsonify(rep)
+        except Exception as e:                       # noqa: BLE001
+            traceback.print_exc()
+            return jsonify({"error": f"성능점수 생성 중 오류: {e}", "status": "exception"})
 
 
 @app.route("/api/bulk_report")

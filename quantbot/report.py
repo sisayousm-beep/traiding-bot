@@ -15,6 +15,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import math
 
 import pandas as pd
 
@@ -474,6 +475,135 @@ def ranking_report(markets, days: int = 30) -> dict:
     return {
         "meta": {
             "markets": markets, "market_labels": labels,
+            "days": days, "n_sessions": len(reports),
+            "date_from": sessions[0]["session_date"] if sessions else None,
+            "date_to": sessions[-1]["session_date"] if sessions else None,
+        },
+        "bots": bots,
+        "sessions": sessions,
+    }
+
+
+# ===== 시장 보정 성능점수(=실력 점수) =====
+# 성격이 다른 두 그룹을 따로 평가: 우량주(일반) vs 급등주(🔥).
+SCORE_GROUPS = {
+    "normal": ["kr", "us"],          # 국장 + 미장 (우량 기술주)
+    "hot": ["kr_hot", "us_hot"],     # 급등 국장 + 급등 미장 (모멘텀/테마주)
+}
+# 신뢰가중 평균알파가 이 값(2%/일)이면 tanh가 거의 포화 → 점수 만점에 근접.
+_SCORE_SCALE = 0.02
+# 청산(파산)한 적이 있으면 점수 상한(시장 매치=50 아래로) — 큰 한 방의 위험을 벌점.
+_BANKRUPT_CAP = 30.0
+
+
+def _std(xs: list[float]) -> float | None:
+    n = len(xs)
+    if n < 2:
+        return None
+    mu = sum(xs) / n
+    return (sum((x - mu) ** 2 for x in xs) / n) ** 0.5
+
+
+def score_bots(reports: list[dict]) -> list[dict]:
+    """그날 장 상황(시장 수익률)을 빼낸 알파를 모아 봇별 '성능점수'를 만든다.
+
+    핵심: 절대 수익은 그날 장이 좋았는지에 크게 좌우된다. 그래서 봇 성과를
+    '그날 시장(등가중 매수보유) 대비 초과수익(알파)'으로 환산하면, 상승장 덕에
+    번 봇과 진짜 실력 봇이 구분된다. 알파를 한 주간 모아:
+      - 평균 알파(avg_alpha): 시장 보정 후 평균적으로 얼마나 더 벌었나(실력의 크기)
+      - 시장승률(beat_rate): 며칠이나 시장을 이겼나(꾸준함)
+      - 정보비율(info_ratio = 평균알파/알파표준편차): 운이 아닌 실력의 신뢰도
+
+    성능점수(0~100): 50 = 시장과 동일(실력 0). 위로 갈수록 시장 보정 실력↑.
+      score = 50 + 50·tanh( 평균알파 · (0.5+시장승률) / SCALE )
+      (시장승률을 신뢰가중치로 곱해, 하루 운으로 번 봇은 점수를 깎는다.)
+      청산 이력이 있으면 상한 30으로 벌점(큰 손실 위험 반영).
+    """
+    agg: dict[str, dict] = {}
+    for rep in reports:
+        mret = rep.get("market", {}).get("market_return")
+        for b in rep.get("bots", []):
+            name = b.get("name")
+            d = agg.setdefault(name, {
+                "name": name, "tagline": b.get("tagline"), "leverage": b.get("leverage"),
+                "alphas": [], "returns": [], "mkts": [],
+                "beats": 0, "beat_n": 0, "bust": 0, "n": 0,
+            })
+            d["n"] += 1
+            if b.get("alpha") is not None:
+                d["alphas"].append(b["alpha"])
+            if b.get("daily_return") is not None:
+                d["returns"].append(b["daily_return"])
+            if mret is not None:
+                d["mkts"].append(mret)
+            if b.get("beat_market") is not None:
+                d["beat_n"] += 1
+                d["beats"] += 1 if b["beat_market"] else 0
+            if b.get("bankrupt"):
+                d["bust"] += 1
+
+    out = []
+    for d in agg.values():
+        alphas = d["alphas"]
+        avg_alpha = sum(alphas) / len(alphas) if alphas else None
+        std_alpha = _std(alphas)
+        avg_ret = sum(d["returns"]) / len(d["returns"]) if d["returns"] else None
+        avg_mkt = sum(d["mkts"]) / len(d["mkts"]) if d["mkts"] else None
+        beat_rate = d["beats"] / d["beat_n"] if d["beat_n"] else None
+        info_ratio = (avg_alpha / std_alpha) if (avg_alpha is not None
+                                                 and std_alpha and std_alpha > 0) else None
+
+        if avg_alpha is None:
+            score = None
+        else:
+            conf = 0.5 + (beat_rate if beat_rate is not None else 0.5)
+            score = 50.0 + 50.0 * math.tanh(avg_alpha * conf / _SCORE_SCALE)
+            if d["bust"] > 0:
+                score = min(score, _BANKRUPT_CAP)
+            score = round(score, 1)
+
+        out.append({
+            "name": d["name"], "tagline": d["tagline"], "leverage": _clean(d["leverage"]),
+            "score": _clean(score), "n_sessions": d["n"],
+            "avg_alpha": _clean(avg_alpha),
+            "avg_return": _clean(avg_ret),
+            "avg_market_return": _clean(avg_mkt),
+            "beat_rate": _clean(beat_rate),
+            "info_ratio": _clean(info_ratio),
+            "alpha_vol": _clean(std_alpha),
+            "bankrupt_count": d["bust"],
+        })
+    out.sort(key=lambda d: (d["score"] is None,
+                            -(d["score"] if d["score"] is not None else -9e9)))
+    for i, d in enumerate(out):
+        d["rank"] = i + 1
+    return out
+
+
+def score_report(group: str, days: int = 7) -> dict:
+    """그룹(normal=국장+미장 / hot=급등 국장+급등 미장)의 봇 성능점수 표.
+
+    근 days일(기본 7일=일주일) 완료 세션을 두 시장에서 모아 한 점수로 합산한다.
+    알파는 '각 세션의 자기 시장 대비 초과수익'이라 국장·미장을 섞어도 동질이다.
+    """
+    markets = SCORE_GROUPS.get(group)
+    if not markets:
+        return {"error": f"알 수 없는 그룹: {group}", "status": "bad_group"}
+    reports = bulk_reports(markets, days=days)
+    bots = score_bots(reports)
+
+    sessions = [{
+        "session_date": r["meta"].get("session_date"),
+        "market": r["meta"].get("market"),
+        "regime": r.get("market", {}).get("regime_label"),
+        "market_return": r.get("market", {}).get("market_return"),
+    } for r in reports]
+    sessions.sort(key=lambda s: (str(s["session_date"]), str(s["market"])))
+
+    labels = [config.MARKETS[m]["short"] for m in markets]
+    return {
+        "meta": {
+            "group": group, "markets": markets, "market_labels": labels,
             "days": days, "n_sessions": len(reports),
             "date_from": sessions[0]["session_date"] if sessions else None,
             "date_to": sessions[-1]["session_date"] if sessions else None,
