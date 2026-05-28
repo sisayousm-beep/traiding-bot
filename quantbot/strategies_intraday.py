@@ -9,6 +9,8 @@
 """
 from __future__ import annotations
 
+import math
+
 import pandas as pd
 
 
@@ -53,28 +55,6 @@ class Atlas(IntradayStrategy):
         return self._equal(list(ret.head(self.top_n).index))
 
 
-class Nova(IntradayStrategy):
-    """VWAP 아래로 과하게 밀린 종목의 반등을 노리는 평균회귀 봇."""
-    name = "Nova"
-    tagline = "VWAP 이탈 종목 반등 매수 (VWAP Reversion)"
-    warmup_min = 10
-    rebalance_min = 3
-
-    def __init__(self, dev: float = 0.003, top_n: int = 3):
-        self.dev = dev
-        self.top_n = top_n
-
-    def weights(self, closes, volumes, open_px):
-        avail = self._avail(closes)
-        pv = (closes[avail] * volumes[avail]).cumsum()
-        vv = volumes[avail].cumsum().replace(0, pd.NA)
-        vwap = (pv / vv).iloc[-1]
-        last = closes.iloc[-1][avail]
-        deviation = (last / vwap - 1.0).dropna()
-        cand = deviation[deviation < -self.dev].sort_values()  # 가장 많이 밀린 순
-        return self._equal(list(cand.head(self.top_n).index))
-
-
 class Orion(IntradayStrategy):
     """개장 후 첫 15분 고점을 상향 돌파하는 종목을 잡는 ORB 봇."""
     name = "Orion"
@@ -93,26 +73,6 @@ class Orion(IntradayStrategy):
         breakout = (last / or_high - 1.0)
         cand = breakout[breakout > 0].sort_values(ascending=False)
         return self._equal(list(cand.head(self.top_n).index))
-
-
-class Vega(IntradayStrategy):
-    """최근 15분 단기 추세가 가장 강한 종목으로 갈아타는 봇."""
-    name = "Vega"
-    tagline = "최근 15분 상대 모멘텀 (Short-window Momentum)"
-    warmup_min = 16
-    rebalance_min = 5
-
-    def __init__(self, win: int = 15, top_n: int = 3):
-        self.win = win
-        self.top_n = top_n
-
-    def weights(self, closes, volumes, open_px):
-        avail = self._avail(closes)
-        if closes.shape[0] <= self.win:
-            return {}
-        ret = (closes.iloc[-1][avail] / closes.iloc[-(self.win + 1)][avail] - 1.0).dropna()
-        ret = ret[ret > 0].sort_values(ascending=False)
-        return self._equal(list(ret.head(self.top_n).index))
 
 
 class Titan(IntradayStrategy):
@@ -162,6 +122,10 @@ class Claude(IntradayStrategy):
       · 보유는 '승자는 내버려 두고 패자만 자른다': 진입 신호가 잠깐 흔들려도 팔지 않고,
         오직 장중 고점 대비 stop%(3%) 추격손절에 걸릴 때만 매도(→ 손실 차단·이익 보존, 회전율↓).
       · 손절된 종목은 cooldown(10분) 동안 재진입 금지 → 같은 자리 휩쏘 반복 방지.
+
+    수치 튜닝(최근 한 달 국장·미장 16세션씩 백테스트 기준):
+      진입 임계 0.55→0.60(더 확실할 때만 투자), 추격손절 0.03→0.025(패자 빨리 절단),
+      보유 3→2종목(상위 리더 집중). 결합 알파 -0.23%→+0.26%로 개선(두 시장 모두 향상).
     """
     name = "Claude"
     tagline = "적응형 리스크관리 모멘텀 — 약세장 현금/VWAP 추세확인/추격손절 (개발: Claude)"
@@ -169,8 +133,8 @@ class Claude(IntradayStrategy):
     rebalance_min = 5          # 회전율(거래비용) 억제: 5분 주기
     leverage = 1.0
 
-    def __init__(self, top_n: int = 3, stop: float = 0.03, slope_win: int = 5,
-                 enter_breadth: float = 0.55, exit_breadth: float = 0.35, cooldown: int = 10):
+    def __init__(self, top_n: int = 2, stop: float = 0.025, slope_win: int = 5,
+                 enter_breadth: float = 0.60, exit_breadth: float = 0.35, cooldown: int = 10):
         self.top_n = top_n
         self.stop = stop                  # 장중 고점 대비 추격손절 폭
         self.slope_win = slope_win        # 단기 기울기 측정 창(분)
@@ -250,5 +214,136 @@ class Claude(IntradayStrategy):
         return {t: w for t in picks}
 
 
+class Opus(IntradayStrategy):
+    """Opus가 직접 설계한 '상대강도 리더·저회전·변동성 추격손절' 봇.
+
+    한 달치(국장·미장) 봇별 보고서를 분석한 세 가지 사실에서 출발한다:
+      (A) 성과의 최대 적은 '회전율'이다. 데이터상 회전율↑ = 알파↓가 거의 단조였다
+          (Sol 회전 1.0 → Nova/Vega/Titan 20~36 → 수수료·슬리피지로 자멸).
+      (B) 절대수익은 '그날 장이 좋았는지'에 휘둘린다. 상승장에선 아무 종목이나 오른다.
+          시장을 '이기는'(=알파) 종목은 시장 대비 초과수익(상대강도)이 큰 종목이다.
+      (C) Orion(ORB)·Claude의 높은 손익비는 '패자 절단·승자 보유'에서 나왔다.
+
+    그래서 Opus의 근본 로직은 기존 봇들과 다르다:
+      · 종목 선정: 절대 모멘텀(시초 대비 상승)이 아니라 '상대강도'(종목수익 − 시장수익)
+        상위 리더를 고른다. 시장을 이기는 종목만 담아야 알파가 난다. 추가로 VWAP 위
+        (기관 평균단가 위=수급 우위) + 단기 기울기 양수 + 과매수(extension) 아님을 요구.
+      · 회전율 억제(사건기반 매매): 구성이 바뀔 때만 주문을 낸다. 보유를 유지할 때는
+        빈 비중({})을 반환해 엔진이 '아무것도 하지 않게' 한다(분단위 미세 리밸런싱=비용 차단).
+        승자는 비중이 커지든 말든 내버려 둔다(let winners run).
+      · 위험관리: 종목별 최근 변동성에 비례한 추격손절(변동성 큰 종목은 넓게, 잔잔하면
+        좁게)로 패자만 자른다. 시장 폭(breadth)이 무너지면 신규 진입만 중단(보유는 손절로 관리).
+      · 진입 전 충분한 워밍업(30분): 개장 직후 노이즈·되돌림을 피하고 '굳은 추세'만 잡는다.
+
+    매매 신호 요약:
+      매수 — 워밍업 후, 시장 폭이 양호하고 빈 슬롯이 있을 때, 상대강도 상위 + VWAP 위 +
+             상승추세 + 과매수 아님 + 쿨다운 아님인 리더를 동일비중으로 채운다.
+      매도 — 장중 고점 대비 변동성비례 추격손절에 걸리거나, VWAP 아래로 빠지며 상대강도가
+             음(−)이 된 '리더 자격 상실' 종목. 그 외에는 종가까지 보유.
+    """
+    name = "Opus"
+    tagline = "상대강도 리더·저회전·변동성 추격손절 — 시장 이기는 종목만 보유 (개발: Opus)"
+    warmup_min = 30           # 개장 노이즈 회피: 30분 굳은 뒤 진입
+    rebalance_min = 3         # 자주 호출되지만 '보유'는 {} 반환이라 회전 0(손절만 빠르게 점검)
+    leverage = 1.0
+
+    # truthy지만 유효(양수) 비중이 없는 딕셔너리 → 엔진 rebalance가 전량 매도(현금화)한다.
+    # (엔진은 빈 dict {}는 '보유'로 건너뛰므로, 전량청산 신호는 이렇게 표현)
+    _CASH = {"__CASH__": 0.0}
+
+    def __init__(self, top_n: int = 3, scan: int = 15, stop_k: float = 3.0,
+                 stop_floor: float = 0.02, stop_cap: float = 0.06, stop_hz: int = 30,
+                 ext_cap: float = 0.04, vol_win: int = 15, slope_win: int = 5,
+                 breadth_gate: float = 0.45, rs_min: float = 0.0, cooldown: int = 15):
+        self.top_n = top_n
+        self.scan = scan                  # 신규 진입 스캔 주기(분): 잦은 종목 교체 억제
+        self.stop_k = stop_k              # 추격손절 폭 = stop_k × 변동성 × √stop_hz
+        self.stop_floor = stop_floor
+        self.stop_cap = stop_cap
+        self.stop_hz = stop_hz            # 손절 허용 노이즈 시계(분): √시간 스케일
+        self.ext_cap = ext_cap            # VWAP 대비 과매수 한도(이보다 벌어지면 추격 금지)
+        self.vol_win = vol_win            # 변동성 측정 창(분)
+        self.slope_win = slope_win        # 단기 기울기 창(분)
+        self.breadth_gate = breadth_gate  # 신규 진입을 허용할 시장 폭 하한
+        self.rs_min = rs_min              # 상대강도 진입 하한(시장 대비 초과수익)
+        self.cooldown = cooldown          # 손절 후 같은 종목 재진입 금지(분)
+        self._held: set[str] = set()
+        self._peak: dict[str, float] = {}
+        self._cool: dict[str, int] = {}
+        self._last_scan = -10 ** 9
+
+    def weights(self, closes, volumes, open_px):
+        n = closes.shape[0]
+        avail = self._avail(closes)
+        if not avail or n < self.slope_win + 2:
+            return {}
+
+        last = closes.iloc[-1][avail]
+        pv = (closes[avail] * volumes[avail]).cumsum()
+        vv = volumes[avail].cumsum().replace(0, pd.NA)
+        vwap = (pv / vv).iloc[-1]
+        ret_open = last / open_px[avail] - 1.0
+        market_ret = float(ret_open.mean())          # 등가중 시장(=평가 기준선) 당일 수익
+        rs = ret_open - market_ret                    # 상대강도(시장 대비 초과) = 알파의 원천
+        above = last > vwap
+        breadth = float(above.mean())
+        ext = last / vwap - 1.0
+        prev = closes.iloc[-(self.slope_win + 1)][avail]
+        slope = last / prev - 1.0
+        vol = closes[avail].pct_change().iloc[-self.vol_win:].std()
+
+        self._cool = {t: c - 1 for t, c in self._cool.items() if c - 1 > 0}
+
+        # 보유 종목 장중 고점 갱신 + 손절/리더자격 상실 판정
+        for t in list(self._held):
+            if t in last.index and pd.notna(last[t]):
+                self._peak[t] = max(self._peak.get(t, float(last[t])), float(last[t]))
+        survivors = []
+        for t in list(self._held):
+            px = float(last.get(t, float("nan")))
+            if px != px:                              # NaN → 판단 보류, 유지
+                survivors.append(t)
+                continue
+            pk = self._peak.get(t, px)
+            vt = float(vol.get(t, 0.0) or 0.0)
+            stop_pct = min(self.stop_cap,
+                           max(self.stop_floor, self.stop_k * vt * math.sqrt(self.stop_hz)))
+            stopped = px < pk * (1 - stop_pct)
+            lost_lead = (px < float(vwap.get(t, px))) and (float(rs.get(t, 0.0)) < 0)
+            if stopped or lost_lead:
+                self._cool[t] = self.cooldown
+            else:
+                survivors.append(t)
+
+        # 신규 진입: 시장 폭 양호 + 스캔 주기 + 빈 슬롯일 때 상대강도 상위 리더로 채움
+        desired = list(survivors)
+        free = self.top_n - len(desired)
+        if breadth >= self.breadth_gate and free > 0 and (n - self._last_scan) >= self.scan:
+            self._last_scan = n
+            cand = [t for t in avail
+                    if t not in desired and t not in self._cool
+                    and bool(above.get(t)) and float(ret_open.get(t, 0.0)) > 0
+                    and float(rs.get(t, -9.0)) > self.rs_min
+                    and float(slope.get(t, 0.0)) > 0
+                    and float(ext.get(t, 9.0)) <= self.ext_cap
+                    and pd.notna(vwap.get(t))]
+            cand.sort(key=lambda t: -float(rs[t]))
+            desired.extend(cand[:free])
+
+        desired = desired[: self.top_n]
+        desired_set = set(desired)
+
+        # 사건기반: 구성이 같으면 보유(회전 0), 다르면 교체. 비면 전량 현금.
+        if desired_set == self._held:
+            return {}
+        self._held = desired_set
+        self._peak = {t: self._peak.get(t, float(last[t]))
+                      for t in desired_set if t in last.index and pd.notna(last[t])}
+        if not desired_set:
+            return dict(self._CASH)
+        w = self.leverage / len(desired_set)
+        return {t: w for t in desired_set}
+
+
 def default_bots() -> list[IntradayStrategy]:
-    return [Atlas(), Nova(), Orion(), Vega(), Titan(), Claude(), Sol()]
+    return [Atlas(), Orion(), Titan(), Claude(), Opus(), Sol()]
