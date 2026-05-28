@@ -59,8 +59,8 @@ def _round_trips(trades) -> list[dict]:
                 trips.append({
                     "ticker": tk, "name": NAME(tk), "qty": take,
                     "buy_price": lot[1], "sell_price": t.price,
-                    "buy_time": lot[2].strftime("%H:%M") if hasattr(lot[2], "strftime") else str(lot[2]),
-                    "sell_time": t.date.strftime("%H:%M") if hasattr(t.date, "strftime") else str(t.date),
+                    "buy_time": config.to_kst_hm(lot[2]),
+                    "sell_time": config.to_kst_hm(t.date),
                     "hold_min": hold,
                     "pnl": pnl, "ret": (pnl / buy_cost) if buy_cost > 1e-12 else None,
                     "commission": sell_comm_ps * take,

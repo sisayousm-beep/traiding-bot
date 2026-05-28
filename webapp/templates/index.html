@@ -375,8 +375,15 @@ function tlMetricsAt(name,i){
   return {DailyReturn:cur/cap-1,PeakGain:peak/cap-1,MaxDrawdown:mdd,
           WinMinutes:cnt?up/cnt:null,FinalEquity:cur};
 }
-function tlTradesAt(name,i){const cut=FULL.times[i],all=FULL.trades[name]||[],out=[];
-  for(const t of all){if(t.time>cut)break; out.push(t);} return out;}
+function tlTradesAt(name,i){
+  // 미장은 한국시간이 자정을 넘겨(22:30→05:00) 시간 문자열이 단조롭지 않으므로
+  // 문자열 비교가 아니라 '분봉 인덱스'로 컷한다.
+  if(FULL && !FULL._tidx){FULL._tidx={}; FULL.times.forEach((t,k)=>{if(FULL._tidx[t]===undefined)FULL._tidx[t]=k;});}
+  const map=(FULL&&FULL._tidx)||{},all=FULL.trades[name]||[],out=[];
+  for(const t of all){const ti=map[t.time];
+    if(ti!==undefined){if(ti<=i)out.push(t);}
+    else if(t.time<=FULL.times[i])out.push(t);}
+  return out;}
 function tlHoldingsAt(name,i){
   const cap=FULL.meta.capital; let cash=cap; const sh={};
   for(const t of tlTradesAt(name,i)){

@@ -2,6 +2,20 @@
 from __future__ import annotations
 
 import os
+from zoneinfo import ZoneInfo
+
+# 화면 표시는 사용자(한국) 기준 시간으로 통일. 미장도 한국시간(22:30~05:00)으로 보인다.
+DISPLAY_TZ = ZoneInfo("Asia/Seoul")
+
+
+def to_kst_hm(ts) -> str:
+    """타임존이 붙은 타임스탬프를 한국시간 'HH:MM' 문자열로. (국장은 그대로)"""
+    try:
+        if ts.tzinfo is not None:
+            ts = ts.astimezone(DISPLAY_TZ)
+        return ts.strftime("%H:%M")
+    except AttributeError:
+        return str(ts)
 
 # --- 거래 비용 (실제 환경 근사) ---
 COMMISSION_BPS = 5.0                 # 체결 명목금액 대비 수수료 (basis point, 5 = 0.05%)

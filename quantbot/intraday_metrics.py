@@ -68,8 +68,7 @@ def _trades_payload(pf) -> tuple[list[dict], float]:
     realized_total = 0.0
     out = []
     for t in pf.trades:
-        ts = t.date
-        tstr = ts.strftime("%H:%M") if hasattr(ts, "strftime") else str(ts)
+        tstr = config.to_kst_hm(t.date)
         amount = t.shares * t.price
         realized = realized_pct = None
         if t.side == "BUY":
@@ -100,7 +99,7 @@ def _trades_payload(pf) -> tuple[list[dict], float]:
 def to_payload(results, closes: pd.DataFrame, session_date, market: str,
                mode: str, capital: float, view: dict) -> dict:
     m = config.MARKETS[market]
-    times = [ts.strftime("%H:%M") for ts in closes.index]
+    times = [config.to_kst_hm(ts) for ts in closes.index]
     open_px = closes.iloc[0]
     last = closes.iloc[-1]
 
