@@ -76,23 +76,129 @@ class Orion(IntradayStrategy):
 
 
 class Titan(IntradayStrategy):
-    """3배 레버리지로 시초 모멘텀 상위 2종목에 몰빵하는 초공격 스캘퍼."""
-    name = "Titan-3X"
-    tagline = "3배 레버리지 초단타 — 시초 모멘텀 집중 (고위험)"
-    warmup_min = 3
-    rebalance_min = 2
-    leverage = 3.0
+    """3배 레버리지로 시초 모멘텀 상위 종목에 몰빵하는 초공격 스캘퍼.
 
-    def __init__(self, top_n: int = 2):
+    [v2 — '초반 잘 벌다 중반 급락' 교정]
+    한 달치(국장·미장·급등주) 보고서에서 Titan은 장중 평균 +6.3% 고점을 찍고도
+    종가 −7.0%로 마감해 평균 13%p를 토해냈다(peak>2%인데 종가 마이너스인 날 절반).
+    원인은 명확했다: 3배 레버리지인데 ①손절 없음 ②레짐 필터 없음(보합·하락장에도
+    풀노출) ③2분마다 모멘텀 상위를 재추격(374매매·회전 38배)해 되돌림을 3배로 맞고
+    수수료로 자멸. 실제로 strong_bull(+2.0% 알파)을 빼면 전 국면에서 −6~−13% 알파.
+
+    그래서 '공격성(3배·시초 모멘텀 집중)'은 유지하되 생존 장치 4개를 더한다:
+      · 레짐 게이트 — 시장 폭(VWAP 상회 비율)이 강하고 등가중 지수가 확실히 오를 때만
+        3배 진입(Titan이 유일하게 이기는 강세 국면에 노출을 몰아준다). 그 외엔 현금.
+      · 동적 손절 — 진입가 −hard% 고정 손절, +trail_trigger 이익을 넘기면 고점 대비
+        −trail% 추격손절로 전환(딴 이익을 3배 레버리지째 지킨다).
+      · 당일 관망 래치 — 시장 폭이 무너지거나(exit) 지수가 꺾이면 전량 청산 후 그날은
+        재진입 금지. 오후 되돌림에 3배로 끌려가는 '중반 급락'을 원천 차단.
+      · 저회전 — 신규 진입은 scan 분 주기, 구성이 같으면 빈 비중 반환(회전 0)으로
+        분단위 재추격·수수료 자멸을 막는다.
+    """
+    name = "Titan-3X"
+    tagline = "3배 레버리지 초단타 — 강세 게이트·동적 손절·당일 관망 (고위험·v2)"
+    warmup_min = 5
+    rebalance_min = 2          # 손절 감시는 촘촘히(보유 유지면 {} 반환 → 회전 0)
+    leverage = 3.0
+    _CASH = {"__CASH__": 0.0}  # truthy지만 유효비중 없음 → 엔진이 전량 매도(현금화)
+
+    def __init__(self, top_n: int = 2, scan: int = 5,
+                 enter_breadth: float = 0.60, exit_breadth: float = 0.45,
+                 index_up: float = 0.002, index_collapse: float = -0.002,
+                 hard_stop: float = 0.02, trail_trigger: float = 0.03,
+                 trail_stop: float = 0.02, cooldown: int = 15):
         self.top_n = top_n
+        self.scan = scan
+        self.enter_breadth = enter_breadth   # 3배 진입 허용 시장 폭(상단)
+        self.exit_breadth = exit_breadth     # 이 밑으로 무너지면 그날 관망
+        self.index_up = index_up             # 신규 진입을 허용할 지수 상승 하한
+        self.index_collapse = index_collapse  # 지수가 이 밑이면 그날 관망
+        self.hard_stop = hard_stop           # 진입가 대비 고정 손절(×3 레버리지)
+        self.trail_trigger = trail_trigger   # 이 이익 넘기면 추격손절 전환
+        self.trail_stop = trail_stop         # 고점 대비 추격손절 폭
+        self.cooldown = cooldown
+        self._held: set[str] = set()
+        self._entry: dict[str, float] = {}
+        self._peak: dict[str, float] = {}
+        self._cool: dict[str, int] = {}
+        self._last_scan = -10 ** 9
+        self._halt = False                   # 그날 관망 래치(자본 방어)
 
     def weights(self, closes, volumes, open_px):
+        n = closes.shape[0]
         avail = self._avail(closes)
         if not avail:
             return {}
-        ret = (closes.iloc[-1][avail] / open_px[avail] - 1.0).dropna()
-        ret = ret[ret > 0].sort_values(ascending=False)
-        return self._equal(list(ret.head(self.top_n).index))
+        last = closes.iloc[-1][avail]
+        pv = (closes[avail] * volumes[avail]).cumsum()
+        vv = volumes[avail].cumsum().replace(0, pd.NA)
+        vwap = (pv / vv).iloc[-1]
+        ret_open = (last / open_px[avail] - 1.0).dropna()
+        index_ret = float(ret_open.mean()) if len(ret_open) else 0.0
+        breadth = float((last > vwap).mean())
+
+        self._cool = {t: c - 1 for t, c in self._cool.items() if c - 1 > 0}
+        for t in list(self._held):                    # 보유 종목 장중 고점 갱신
+            if t in last.index and pd.notna(last[t]):
+                self._peak[t] = max(self._peak.get(t, float(last[t])), float(last[t]))
+
+        if self._halt:                                # 그날 관망 래치 → 현금 유지
+            return self._flatten() if self._held else {}
+
+        # 동적 손절/익절 — 매 호출(2분)마다 감시해야 −2% 손절이 실제로 작동(3배라 필수)
+        survivors = []
+        for t in list(self._held):
+            px = float(last.get(t, float("nan")))
+            if px != px:
+                survivors.append(t); continue
+            entry = self._entry.get(t, px)
+            peak = self._peak.get(t, px)
+            if peak >= entry * (1 + self.trail_trigger):
+                out = px < peak * (1 - self.trail_stop)
+            else:
+                out = px < entry * (1 - self.hard_stop)
+            if out:
+                self._cool[t] = self.cooldown
+            else:
+                survivors.append(t)
+
+        # 레짐 판단·신규 진입은 scan 주기에만(틱 노이즈로 그날을 통째로 관망시키지 않음)
+        desired = list(survivors)
+        if (n - self._last_scan) >= self.scan:
+            self._last_scan = n
+            if breadth < self.exit_breadth or index_ret < self.index_collapse:
+                self._halt = True                     # 강세 붕괴 → 그날 관망(중반 급락 차단)
+                desired = []
+            elif breadth >= self.enter_breadth and index_ret > self.index_up:
+                free = self.top_n - len(desired)
+                if free > 0:
+                    mom = ret_open[ret_open > 0].sort_values(ascending=False)
+                    for t in mom.index:
+                        if len(desired) >= self.top_n:
+                            break
+                        if t in desired or t in self._cool:
+                            continue
+                        desired.append(t)
+
+        desired = desired[: self.top_n]
+        new_set = set(desired)
+        if new_set == self._held:                     # 구성 동일 → 보유(회전 0)
+            return {}
+        for t in new_set:
+            if t not in self._entry:
+                self._entry[t] = float(last[t]); self._peak[t] = float(last[t])
+        for t in list(self._entry):
+            if t not in new_set:
+                self._entry.pop(t, None); self._peak.pop(t, None)
+        self._held = new_set
+        if not new_set:
+            return dict(self._CASH)
+        w = self.leverage / self.top_n                # 슬롯 고정(3배 풀노출)
+        return {t: w for t in new_set}
+
+    def _flatten(self):
+        self._held = set(); self._entry = {}; self._peak = {}
+        return dict(self._CASH)
 
 
 class Sol(IntradayStrategy):
@@ -123,9 +229,11 @@ class Claude(IntradayStrategy):
         오직 장중 고점 대비 stop%(3%) 추격손절에 걸릴 때만 매도(→ 손실 차단·이익 보존, 회전율↓).
       · 손절된 종목은 cooldown(10분) 동안 재진입 금지 → 같은 자리 휩쏘 반복 방지.
 
-    수치 튜닝(최근 한 달 국장·미장 16세션씩 백테스트 기준):
-      진입 임계 0.55→0.60(더 확실할 때만 투자), 추격손절 0.03→0.025(패자 빨리 절단),
-      보유 3→2종목(상위 리더 집중). 결합 알파 -0.23%→+0.26%로 개선(두 시장 모두 향상).
+    수치 튜닝(최근 한 달 국장·미장·급등주 64세션 백테스트 기준):
+      보유 3→2종목(상위 리더 집중). v2 재튜닝 — 기울기창 5→10분(장중 노이즈를 더 걸러
+      '굳은 추세'에만 진입), 추격손절 0.025→0.03(상승장 정상 되돌림에 조기 손절당해
+      재매수하며 흘리던 손실 차단), 진입 임계 0.60→0.55(완만한 상승장 참여 확대).
+      결합 알파 +0.10%→+0.32%로 개선(특히 강세장 −0.5%→+1.0%로 반전).
     """
     name = "Claude"
     tagline = "적응형 리스크관리 모멘텀 — 약세장 현금/VWAP 추세확인/추격손절 (개발: Claude)"
@@ -133,8 +241,8 @@ class Claude(IntradayStrategy):
     rebalance_min = 5          # 회전율(거래비용) 억제: 5분 주기
     leverage = 1.0
 
-    def __init__(self, top_n: int = 2, stop: float = 0.025, slope_win: int = 5,
-                 enter_breadth: float = 0.60, exit_breadth: float = 0.35, cooldown: int = 10):
+    def __init__(self, top_n: int = 2, stop: float = 0.03, slope_win: int = 10,
+                 enter_breadth: float = 0.55, exit_breadth: float = 0.35, cooldown: int = 10):
         self.top_n = top_n
         self.stop = stop                  # 장중 고점 대비 추격손절 폭
         self.slope_win = slope_win        # 단기 기울기 측정 창(분)
@@ -240,6 +348,11 @@ class Opus(IntradayStrategy):
              상승추세 + 과매수 아님 + 쿨다운 아님인 리더를 동일비중으로 채운다.
       매도 — 장중 고점 대비 변동성비례 추격손절에 걸리거나, VWAP 아래로 빠지며 상대강도가
              음(−)이 된 '리더 자격 상실' 종목. 그 외에는 종가까지 보유.
+
+    수치 튜닝(국장·미장·급등주 64세션 백테스트): 과매수 한도 0.04→0.08, 진입 시장폭
+      0.45→0.40. 기존 봇은 완만한 상승장(bull)에서 리더가 VWAP 위로 살짝 벌어졌다는
+      이유로 진입을 막아 추세를 놓쳤다(bull 알파 −0.7%). 문턱을 현실화하니 bull −0.7%→−0.1%,
+      결합 알파 +0.36%→+0.38%로 개선(하락장 방어는 거의 그대로).
     """
     name = "Opus"
     tagline = "상대강도 리더·저회전·변동성 추격손절 — 시장 이기는 종목만 보유 (개발: Opus)"
@@ -253,8 +366,8 @@ class Opus(IntradayStrategy):
 
     def __init__(self, top_n: int = 3, scan: int = 15, stop_k: float = 3.0,
                  stop_floor: float = 0.02, stop_cap: float = 0.06, stop_hz: int = 30,
-                 ext_cap: float = 0.04, vol_win: int = 15, slope_win: int = 5,
-                 breadth_gate: float = 0.45, rs_min: float = 0.0, cooldown: int = 15):
+                 ext_cap: float = 0.08, vol_win: int = 15, slope_win: int = 5,
+                 breadth_gate: float = 0.40, rs_min: float = 0.0, cooldown: int = 15):
         self.top_n = top_n
         self.scan = scan                  # 신규 진입 스캔 주기(분): 잦은 종목 교체 억제
         self.stop_k = stop_k              # 추격손절 폭 = stop_k × 변동성 × √stop_hz
@@ -358,6 +471,13 @@ class Gemini(IntradayStrategy):
       진입 폭 0.55→0.60, 관망 전환 폭 0.40→0.45(약해지면 더 빨리 현금). 손실 난 날
       5→2일, 누적손실 -3.1%→-0.7%, 최악의 날 -1.17%→-0.59%로 하방을 크게 줄였다.
       (고정 손절은 더 조이면 휩쏘로 손실이 오히려 커져 -1.5% 유지. 4중 필터는 그대로.)
+
+    v2 — '거래 마비' 해소: 위 손실최소화 튜닝이 너무 빡빡해 64세션 중 57일을 무거래로
+      흘려보내 상승장 참여를 통째로 놓쳤다(강세장 알파 −2.4%). 하방 방어(약세장 +2.9%)는
+      그대로 두고 '확실한 자리'의 문턱만 현실화한다: 안전 밴드 0.5~2.0%→0.2~3.5%(되돌림이
+      얕아도 진입), 수급 폭발 200%→130%. 거래일 7→11일·결합 알파 +0.27%→+0.30%로,
+      하방을 지키면서도 더 자주 참여한다. (폭등장 추격은 sniper 구조상 늦은 고점 매수가 돼
+      손절로 더 잃으므로 도입하지 않음 — 상승장 미참여는 이 봇의 의도된 비용.)
     ② 4중 확인 진입 — 네 조건을 모두 충족하는 종목만 저격 매수:
        (Orion) 개장 첫 15분 고가 상향 돌파 · (Atlas) 시초 대비 수익률 양수 상위 ·
        (안전 바닥) 현재가가 VWAP +0.5%~+2% 밴드 안(과열 추격 금지) ·
@@ -376,8 +496,8 @@ class Gemini(IntradayStrategy):
     _CASH = {"__CASH__": 0.0}  # truthy지만 유효비중 없음 → 엔진이 전량 매도(현금화)
 
     def __init__(self, top_n: int = 2, scan: int = 15, or_min: int = 15,
-                 band_lo: float = 0.005, band_hi: float = 0.02,
-                 vol_mult: float = 2.0, vol_recent: int = 5,
+                 band_lo: float = 0.002, band_hi: float = 0.035,
+                 vol_mult: float = 1.3, vol_recent: int = 5,
                  hard_stop: float = 0.015, trail_trigger: float = 0.03,
                  trail_stop: float = 0.02, cooldown: int = 30,
                  enter_breadth: float = 0.60, exit_breadth: float = 0.45,
