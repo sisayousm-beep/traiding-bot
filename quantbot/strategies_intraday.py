@@ -625,5 +625,203 @@ class Gemini(IntradayStrategy):
         return dict(self._CASH)
 
 
+class Bita(Titan):
+    """Titan과 '동일한 매매 로직'을 쓰되, 하루 목표수익(기본 +1%)을 달성하면 전량 청산하고
+    그날은 더 이상 투자하지 않는 목표지향형 봇 (실험).
+
+    근거: Titan은 오전 모멘텀에서 초반 이익을 자주 낸다. 그 이익이 +1%에 닿는 순간 확정·청산해
+    이후의 되돌림·꼬리위험에 노출되지 않게 한다('번 날은 지키고 끝낸다').
+
+    구현: 엔진은 전략에 자기 평가액을 알려주지 않으므로, Bita가 슬롯 고정비중(leverage/top_n)과
+    진입가로 당일 수익률을 자체 추정한다. 포지션을 청산할 때마다 실현손익을 누적하고, 보유분은
+    현재가로 평가한 미실현손익을 더해 '추정 당일 수익률'을 만든다. 이 값이 target을 넘으면
+    전량 청산 후 _done 래치를 걸어 종가까지 현금을 유지한다. (수수료·슬리피지는 추정에서 제외
+    되므로 실제 실현 수익률은 target보다 약간 낮게 찍힐 수 있다.)
+    """
+    name = "Bita"
+    tagline = "Titan 로직 + 하루 +1% 달성 시 청산·관망 (목표지향·실험·고위험)"
+
+    def __init__(self, target: float = 0.01, **kw):
+        super().__init__(**kw)
+        self.target = target          # 달성 시 청산하는 당일 목표수익률
+        self._realized = 0.0          # 청산으로 확정된 누적 수익(슬롯비중 가중)
+        self._done = False            # 목표 달성 래치 → 그날 관망
+
+    def weights(self, closes, volumes, open_px):
+        if self._done:
+            return self._flatten() if self._held else {}
+        avail = self._avail(closes)
+        if not avail:
+            return {}
+        last = closes.iloc[-1][avail]
+        slot_w = self.leverage / self.top_n
+        # 진입 전 '추정 당일 수익률' = 누적 실현 + 현 보유 미실현
+        unreal = sum(slot_w * (float(last[t]) / self._entry[t] - 1.0)
+                     for t in self._held
+                     if t in last.index and pd.notna(last[t]) and t in self._entry)
+        if self._realized + unreal >= self.target:
+            self._done = True
+            return self._flatten() if self._held else {}
+        # 목표 미달 → Titan 로직 그대로. 단 이번 호출에서 청산된 종목의 손익을 실현분에 누적.
+        old_held = set(self._held)
+        old_entry = dict(self._entry)
+        w = super().weights(closes, volumes, open_px)
+        for t in old_held - self._held:
+            if t in old_entry and t in last.index and pd.notna(last[t]):
+                self._realized += slot_w * (float(last[t]) / old_entry[t] - 1.0)
+        return w
+
+
+class Mythos(IntradayStrategy):
+    """Opus(상대강도 리더·저회전·변동성 추격손절)와 Claude(레짐 히스테리시스·다중확인 진입·
+    패자절단)의 장점만 융합하고, 'RS 지속성' 레이어를 더한 신규 로직.
+
+    설계 철학(두 봇의 강점 결합):
+      · [Claude] 레짐 히스테리시스 — 시장 폭(breadth) 데드밴드(진입 enter / 이탈 exit)로
+        약세장이면 전량 현금(자본 방어), 휩쏘 방지.
+      · [Opus]  상대강도(RS=종목수익−시장수익) 리더만 선정 — '시장을 이기는' 종목만 담아야
+        알파가 난다. 절대 모멘텀(그냥 오른 종목)이 아니라 초과수익 상위를 고른다.
+      · [Opus]  변동성비례 추격손절 + 리더자격 상실(VWAP 아래로 빠지며 RS<0) 매도, 그 외 보유.
+      · [Claude+Opus] 다중확인 진입(VWAP 위 + RS>0 + 단기 기울기 양수 + 과매수 아님) + 쿨다운.
+      · [둘 다] 사건기반 저회전 — 구성이 같으면 빈 비중({}) 반환(회전 0).
+
+    [신규·무거운 레이어] RS 지속성(persistence):
+      최근 persist_win분 동안 '매 분의 RS가 양수였던 비율'을 종목마다 계산한다(분×종목 RS 패널
+      전체를 매 호출마다 다시 만든다 — 다른 봇보다 연산이 2배+ 무겁다). 한 틱 반짝 리더가 아니라
+      '꾸준히 시장을 이겨온' 종목에만 진입(persist_min 이상)하고, 랭킹 점수도 RS×지속성으로 매겨
+      가짜 신호·되돌림 진입을 줄인다.
+    """
+    name = "Mythos"
+    tagline = "Opus×Claude 융합 — 상대강도 리더·RS 지속성·레짐 방어·변동성 손절 (개발: Claude)"
+    warmup_min = 20
+    rebalance_min = 3
+    leverage = 1.0
+    _CASH = {"__CASH__": 0.0}
+
+    def __init__(self, top_n: int = 2, scan: int = 10,
+                 enter_breadth: float = 0.55, exit_breadth: float = 0.35,
+                 breadth_gate: float = 0.45, slope_win: int = 10, persist_win: int = 15,
+                 vol_win: int = 15, persist_min: float = 0.55, rs_min: float = 0.0,
+                 ext_cap: float = 0.08, stop_k: float = 3.0, stop_floor: float = 0.02,
+                 stop_cap: float = 0.06, stop_hz: int = 30, cooldown: int = 10):
+        self.top_n = top_n
+        self.scan = scan                  # 신규 진입 스캔 주기(저회전)
+        self.enter_breadth = enter_breadth  # 현금→투자 전환(레짐 데드밴드 상단)
+        self.exit_breadth = exit_breadth    # 투자→현금 전환(하단). 사이는 상태 유지
+        self.breadth_gate = breadth_gate    # 신규 진입 허용 시장 폭 하한
+        self.slope_win = slope_win
+        self.persist_win = persist_win      # RS 지속성 측정 창(분)
+        self.vol_win = vol_win
+        self.persist_min = persist_min      # 이 비율 이상 '시장 이긴' 종목만 진입
+        self.rs_min = rs_min                # 상대강도 진입 하한
+        self.ext_cap = ext_cap              # VWAP 대비 과매수 한도
+        self.stop_k = stop_k; self.stop_floor = stop_floor
+        self.stop_cap = stop_cap; self.stop_hz = stop_hz
+        self.cooldown = cooldown
+        self._held: set[str] = set()
+        self._peak: dict[str, float] = {}
+        self._cool: dict[str, int] = {}
+        self._defensive = True            # 시작은 방어(현금)
+        self._last_scan = -10 ** 9
+
+    def weights(self, closes, volumes, open_px):
+        n = closes.shape[0]
+        avail = self._avail(closes)
+        if not avail or n < max(self.slope_win, self.persist_win) + 2:
+            return {}
+        last = closes.iloc[-1][avail]
+        pv = (closes[avail] * volumes[avail]).cumsum()
+        vv = volumes[avail].cumsum().replace(0, pd.NA)
+        vwap = (pv / vv).iloc[-1]
+        ret_open = last / open_px[avail] - 1.0
+        market_ret = float(ret_open.mean())
+        rs = ret_open - market_ret                    # 상대강도(시장 대비 초과)
+        above = last > vwap
+        breadth = float(above.mean())
+        ext = last / vwap - 1.0
+        prev = closes.iloc[-(self.slope_win + 1)][avail]
+        slope = last / prev - 1.0
+        vol = closes[avail].pct_change().iloc[-self.vol_win:].std()
+
+        # [무거운 레이어] 최근 persist_win분의 RS 패널 → '시장을 이긴 분의 비율'
+        win = closes[avail].iloc[-self.persist_win:]
+        rel = win.div(open_px[avail], axis=1) - 1.0   # 분×종목: 각 분의 시초 대비 수익
+        mkt = rel.mean(axis=1)                         # 분별 등가중 시장
+        rsp = rel.sub(mkt, axis=0)                     # 분×종목 RS 패널
+        persist = (rsp > 0).mean()                     # 종목별 '리더였던 분' 비율
+
+        self._cool = {t: c - 1 for t, c in self._cool.items() if c - 1 > 0}
+
+        # 레짐 히스테리시스(데드밴드)
+        if self._defensive:
+            if breadth >= self.enter_breadth:
+                self._defensive = False
+        elif breadth < self.exit_breadth:
+            self._defensive = True
+
+        for t in list(self._held):                     # 보유 장중 고점 갱신
+            if t in last.index and pd.notna(last[t]):
+                self._peak[t] = max(self._peak.get(t, float(last[t])), float(last[t]))
+
+        # 방어 레짐 → 전량 현금
+        if self._defensive:
+            if self._held:
+                self._held = set(); self._peak = {}
+                return dict(self._CASH)
+            return {}
+
+        # 보유 관리: 변동성비례 추격손절 OR 리더자격 상실(VWAP 아래 & RS<0)만 매도
+        survivors = []
+        for t in list(self._held):
+            px = float(last.get(t, float("nan")))
+            if px != px:
+                survivors.append(t); continue
+            pk = self._peak.get(t, px)
+            vt = float(vol.get(t, 0.0) or 0.0)
+            stop_pct = min(self.stop_cap,
+                           max(self.stop_floor, self.stop_k * vt * math.sqrt(self.stop_hz)))
+            stopped = px < pk * (1 - stop_pct)
+            lost_lead = (px < float(vwap.get(t, px))) and (float(rs.get(t, 0.0)) < 0)
+            if stopped or lost_lead:
+                self._cool[t] = self.cooldown
+            else:
+                survivors.append(t)
+
+        # 신규 진입: 시장 폭 양호 + 스캔 주기 + 빈 슬롯일 때 다중확인 통과 리더로 채움
+        desired = list(survivors)
+        free = self.top_n - len(desired)
+        if breadth >= self.breadth_gate and free > 0 and (n - self._last_scan) >= self.scan:
+            self._last_scan = n
+            cand = [t for t in avail
+                    if t not in desired and t not in self._cool
+                    and bool(above.get(t)) and float(rs.get(t, -9.0)) > self.rs_min
+                    and float(slope.get(t, 0.0)) > 0
+                    and float(ext.get(t, 9.0)) <= self.ext_cap
+                    and float(persist.get(t, 0.0)) >= self.persist_min
+                    and pd.notna(vwap.get(t))]
+            # 점수 = 상대강도 × (0.5 + 지속성) + 0.25·기울기 (꾸준한 리더 우대)
+            score = {t: float(rs[t]) * (0.5 + float(persist[t])) + 0.25 * float(slope.get(t, 0.0))
+                     for t in cand}
+            cand.sort(key=lambda t: -score[t])
+            desired.extend(cand[:free])
+
+        desired = desired[: self.top_n]
+        desired_set = set(desired)
+        if desired_set == self._held:                  # 구성 동일 → 보유(회전 0)
+            return {}
+        self._held = desired_set
+        self._peak = {t: self._peak.get(t, float(last[t]))
+                      for t in desired_set if t in last.index and pd.notna(last[t])}
+        if not desired_set:
+            return dict(self._CASH)
+        w = self.leverage / len(desired_set)
+        return {t: w for t in desired_set}
+
+    def _flatten(self):
+        self._held = set(); self._peak = {}
+        return dict(self._CASH)
+
+
 def default_bots() -> list[IntradayStrategy]:
-    return [Atlas(), Orion(), Titan(), Claude(), Opus(), Gemini(), Sol()]
+    return [Atlas(), Orion(), Titan(), Claude(), Opus(), Gemini(),
+            Bita(), Mythos(), Sol()]

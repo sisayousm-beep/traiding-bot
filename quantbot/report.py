@@ -430,6 +430,17 @@ def rank_bots(reports: list[dict]) -> list[dict]:
     def avg(xs):
         return (sum(xs) / len(xs)) if xs else None
 
+    def geomean(xs):
+        """일별 수익률의 기하평균(=실제 복리 일평균 성장률). 자본 -100%면 None."""
+        if not xs:
+            return None
+        prod = 1.0
+        for r in xs:
+            prod *= (1.0 + r)
+        if prod <= 0:                       # 자본 전손(복리상 회복 불가) → 정의 안 함
+            return None
+        return prod ** (1.0 / len(xs)) - 1.0
+
     out = []
     for d in agg.values():
         out.append({
@@ -437,6 +448,7 @@ def rank_bots(reports: list[dict]) -> list[dict]:
             "n_sessions": d["n"],
             "avg_rank": _clean(avg(d["ranks"])),
             "avg_return": _clean(avg(d["returns"])),
+            "geo_return": _clean(geomean(d["returns"])),
             "avg_alpha": _clean(avg(d["alphas"])),
             "best_return": _clean(max(d["returns"])) if d["returns"] else None,
             "worst_return": _clean(min(d["returns"])) if d["returns"] else None,
