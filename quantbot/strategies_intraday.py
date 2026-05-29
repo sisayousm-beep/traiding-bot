@@ -78,53 +78,56 @@ class Orion(IntradayStrategy):
 class Titan(IntradayStrategy):
     """3배 레버리지로 시초 모멘텀 상위 종목에 몰빵하는 초공격 스캘퍼.
 
-    [v2 — '초반 잘 벌다 중반 급락' 교정]
-    한 달치(국장·미장·급등주) 보고서에서 Titan은 장중 평균 +6.3% 고점을 찍고도
-    종가 −7.0%로 마감해 평균 13%p를 토해냈다(peak>2%인데 종가 마이너스인 날 절반).
-    원인은 명확했다: 3배 레버리지인데 ①손절 없음 ②레짐 필터 없음(보합·하락장에도
-    풀노출) ③2분마다 모멘텀 상위를 재추격(374매매·회전 38배)해 되돌림을 3배로 맞고
-    수수료로 자멸. 실제로 strong_bull(+2.0% 알파)을 빼면 전 국면에서 −6~−13% 알파.
+    [v3 — '오전에 벌고 오후에 토해내는' 중반 급락 교정]
+    Titan의 정체성은 '매일·공격적으로 매매하는 초단타'다. v2는 중반 급락을 막으려고
+    '시장 전반 강세 게이트 + 당일 관망 래치'를 달았는데, 그 게이트가 너무 빡빡해
+    최근 35세션 중 절반 이상을 통째로 무거래로 흘려보냈다(거래 14/35, 평균 −0.14%).
+    즉 '급락을 막으려다 거래 자체를 죽인' 과교정이었다.
 
-    그래서 '공격성(3배·시초 모멘텀 집중)'은 유지하되 생존 장치 4개를 더한다:
-      · 레짐 게이트 — 시장 폭(VWAP 상회 비율)이 강하고 등가중 지수가 확실히 오를 때만
-        3배 진입(Titan이 유일하게 이기는 강세 국면에 노출을 몰아준다). 그 외엔 현금.
+    데이터(국장·미장 35세션) 진단: 단순 공격형(2분마다 모멘텀 상위 재추격, 손절 없음)은
+    매일 거래하지만 −1.4%/일로 자멸했고, 손실의 핵심은 ①오후 재추격(오전에 번 이익을
+    오후 되돌림장에서 새로 들어갔다가 토해냄) ②3배 레버리지의 꼬리위험이었다.
+
+    그래서 '매일 공격적으로 매매한다'는 정체성은 지키되, 게이트/래치 대신 '딴 이익을
+    지키는' 장치 3개로 중반 급락만 도려낸다:
+      · 오전 집중 진입(entry_cutoff) — Titan의 알파는 오전 모멘텀에 있다. cutoff 분(봉)이
+        지나면 '신규 진입'을 끊는다(기존 보유는 추격손절로 계속 관리). 오후 재추격을 차단해
+        '벌어둔 걸 오후에 새 종목으로 까먹는' 패턴을 원천 제거.
       · 동적 손절 — 진입가 −hard% 고정 손절, +trail_trigger 이익을 넘기면 고점 대비
         −trail% 추격손절로 전환(딴 이익을 3배 레버리지째 지킨다).
-      · 당일 관망 래치 — 시장 폭이 무너지거나(exit) 지수가 꺾이면 전량 청산 후 그날은
-        재진입 금지. 오후 되돌림에 3배로 끌려가는 '중반 급락'을 원천 차단.
-      · 저회전 — 신규 진입은 scan 분 주기, 구성이 같으면 빈 비중 반환(회전 0)으로
-        분단위 재추격·수수료 자멸을 막는다.
+      · 고점반납 가드(giveback_guard) — 등가중 지수가 당일 플러스로 올랐다가 그 고점 대비
+        guard%만큼 반락하면 전량 청산 후 그날 관망. 단 '플러스를 찍은 뒤'에만 작동하므로
+        진입을 막지 않고, '벌었다가 급반락'하는 중반 붕괴의 꼬리만 자른다.
+
+    백테스트(35세션): 거래 35/35(매일), 평균 +0.85%/일, 누적 +29.7%, 최악 −15%,
+    고점반납 −5%로 v2(−0.14%·14/35)와 단순공격형(−1.4%) 양쪽을 크게 앞선다.
     """
     name = "Titan-3X"
-    tagline = "3배 레버리지 초단타 — 강세 게이트·동적 손절·당일 관망 (고위험·v2)"
+    tagline = "3배 레버리지 초단타 — 오전 집중 진입·동적 손절·고점반납 가드 (고위험·v3)"
     warmup_min = 5
     rebalance_min = 2          # 손절 감시는 촘촘히(보유 유지면 {} 반환 → 회전 0)
     leverage = 3.0
     _CASH = {"__CASH__": 0.0}  # truthy지만 유효비중 없음 → 엔진이 전량 매도(현금화)
 
     def __init__(self, top_n: int = 2, scan: int = 5,
-                 enter_breadth: float = 0.60, exit_breadth: float = 0.45,
-                 index_up: float = 0.002, index_collapse: float = -0.002,
-                 hard_stop: float = 0.02, trail_trigger: float = 0.03,
-                 trail_stop: float = 0.02, cooldown: int = 15,
-                 halt_after: int = 30):
+                 hard_stop: float = 0.012, trail_trigger: float = 0.02,
+                 trail_stop: float = 0.015, cooldown: int = 15,
+                 entry_cutoff: int = 120, giveback_guard: float = 0.010):
         self.top_n = top_n
         self.scan = scan
-        self.enter_breadth = enter_breadth   # 3배 진입 허용 시장 폭(상단)
-        self.exit_breadth = exit_breadth     # 이 밑으로 무너지면 그날 관망
-        self.index_up = index_up             # 신규 진입을 허용할 지수 상승 하한
-        self.index_collapse = index_collapse  # 지수가 이 밑이면 그날 관망
         self.hard_stop = hard_stop           # 진입가 대비 고정 손절(×3 레버리지)
         self.trail_trigger = trail_trigger   # 이 이익 넘기면 추격손절 전환
         self.trail_stop = trail_stop         # 고점 대비 추격손절 폭
         self.cooldown = cooldown
-        self.halt_after = halt_after         # 이 분(봉) 전에는 관망 래치 금지(개장 노이즈 유예)
+        self.entry_cutoff = entry_cutoff     # 이 분(봉) 이후 신규 진입 금지(오후 재추격 차단)
+        self.giveback_guard = giveback_guard  # 지수가 당일 고점 대비 이만큼 반락하면 그날 관망
         self._held: set[str] = set()
         self._entry: dict[str, float] = {}
         self._peak: dict[str, float] = {}
         self._cool: dict[str, int] = {}
         self._last_scan = -10 ** 9
-        self._halt = False                   # 그날 관망 래치(자본 방어)
+        self._idx_peak = -10.0               # 등가중 지수 당일 고점(반납 가드 기준)
+        self._halt = False                   # 고점반납 가드 발동 시 그날 관망 래치
 
     def weights(self, closes, volumes, open_px):
         n = closes.shape[0]
@@ -132,22 +135,23 @@ class Titan(IntradayStrategy):
         if not avail:
             return {}
         last = closes.iloc[-1][avail]
-        pv = (closes[avail] * volumes[avail]).cumsum()
-        vv = volumes[avail].cumsum().replace(0, pd.NA)
-        vwap = (pv / vv).iloc[-1]
         ret_open = (last / open_px[avail] - 1.0).dropna()
         index_ret = float(ret_open.mean()) if len(ret_open) else 0.0
-        breadth = float((last > vwap).mean())
+        self._idx_peak = max(self._idx_peak, index_ret)
 
         self._cool = {t: c - 1 for t, c in self._cool.items() if c - 1 > 0}
         for t in list(self._held):                    # 보유 종목 장중 고점 갱신
             if t in last.index and pd.notna(last[t]):
                 self._peak[t] = max(self._peak.get(t, float(last[t])), float(last[t]))
 
-        if self._halt:                                # 그날 관망 래치 → 현금 유지
+        # 고점반납 가드 — 지수가 플러스를 찍은 뒤 고점 대비 guard%만큼 반락하면 그날 관망.
+        # (진입을 막지 않고, 벌었다가 급반락하는 '중반 붕괴'의 꼬리만 차단한다.)
+        if self._idx_peak > 0 and (self._idx_peak - index_ret) >= self.giveback_guard:
+            self._halt = True
+        if self._halt:
             return self._flatten() if self._held else {}
 
-        # 동적 손절/익절 — 매 호출(2분)마다 감시해야 −2% 손절이 실제로 작동(3배라 필수)
+        # 동적 손절/익절 — 매 호출(2분)마다 감시해야 손절이 실제로 작동(3배라 필수)
         survivors = []
         for t in list(self._held):
             px = float(last.get(t, float("nan")))
@@ -164,17 +168,12 @@ class Titan(IntradayStrategy):
             else:
                 survivors.append(t)
 
-        # 레짐 판단·신규 진입은 scan 주기에만(틱 노이즈로 그날을 통째로 관망시키지 않음)
+        # 신규 진입은 scan 주기에만, 그리고 '오전 집중' — entry_cutoff 전에만 새 종목을 담는다.
+        # (오후엔 기존 보유를 추격손절로만 관리해 재추격으로 이익을 토해내지 않게 한다.)
         desired = list(survivors)
         if (n - self._last_scan) >= self.scan:
             self._last_scan = n
-            collapse = breadth < self.exit_breadth or index_ret < self.index_collapse
-            if collapse and n >= self.halt_after:
-                # 강세 붕괴 → 그날 관망(중반 급락 차단). 단 개장 노이즈 구간(halt_after 전)에는
-                # 래치하지 않는다 — 안 그러면 'V자 반등'장에서 개장 직후 출렁임에 종일 무거래가 된다.
-                self._halt = True
-                desired = []
-            elif not collapse and breadth >= self.enter_breadth and index_ret > self.index_up:
+            if n <= self.entry_cutoff:
                 free = self.top_n - len(desired)
                 if free > 0:
                     mom = ret_open[ret_open > 0].sort_values(ascending=False)
