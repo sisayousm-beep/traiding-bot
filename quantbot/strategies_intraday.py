@@ -636,23 +636,30 @@ class Bita(Titan):
     그날은 더 이상 투자하지 않는 목표지향형 봇 (실험).
 
     근거: Titan은 오전 모멘텀에서 초반 이익을 자주 낸다. 그 이익이 +1%에 닿는 순간 확정·청산해
-    이후의 되돌림·꼬리위험에 노출되지 않게 한다('번 날은 지키고 끝낸다').
+    이후의 되돌림·꼬리위험에 노출되지 않게 한다('번 날은 지키고 끝낸다'). 반대로 당일 수익률이
+    -stop_loss(기본 -3%)까지 빠지면 그날은 손절·관망한다.
+
+    -3% 손절 근거(우량·급등 4유니버스 68세션 조사): 당일 수익률이 -3% 아래로 내려간 날은
+    종가에 양전 마감한 경우가 0/8로 '사실상 회생 불가'였다. 그래서 -3% 손절은 살아날 날을
+    하나도 자르지 않으면서 -5%대 폭락만 -3%로 막는다(geomean -0.095%→-0.051%, 최악 -5.3%→-3.2%).
+    더 얕은 -2%는 회생할 날(양전 5일)까지 잘라 오히려 성과가 나빠져 채택하지 않았다.
 
     구현: 엔진은 전략에 자기 평가액을 알려주지 않으므로, Bita가 슬롯 고정비중(leverage/top_n)과
     진입가로 당일 수익률을 자체 추정한다. 포지션을 청산할 때마다 실현손익을 누적하고, 보유분은
-    현재가로 평가한 미실현손익을 더해 '추정 당일 수익률'을 만든다. 이 값이 target을 넘으면
-    전량 청산 후 _done 래치를 걸어 종가까지 현금을 유지한다. (수수료·슬리피지는 추정에서 제외
-    되므로 실제 실현 수익률은 target보다 약간 낮게 찍힐 수 있다.)
+    현재가로 평가한 미실현손익을 더해 '추정 당일 수익률'을 만든다. 이 값이 target을 넘거나
+    -stop_loss 밑으로 빠지면 전량 청산 후 _done 래치를 걸어 종가까지 현금을 유지한다.
+    (수수료·슬리피지는 추정에서 제외되므로 실제 실현 수익률은 추정과 약간 다를 수 있다.)
     """
     name = "Bita"
-    tagline = "Titan 로직(무레버리지) + 하루 +1% 달성 시 청산·관망 (목표지향·실험)"
+    tagline = "Titan 로직(무레버리지) + 하루 +1% 달성/-3% 손절 시 청산·관망 (목표지향·실험)"
     leverage = 1.0                # Titan과 달리 레버리지 미사용(슬롯비중 leverage/top_n에 반영)
 
-    def __init__(self, target: float = 0.01, **kw):
+    def __init__(self, target: float = 0.01, stop_loss: float = 0.03, **kw):
         super().__init__(**kw)
         self.target = target          # 달성 시 청산하는 당일 목표수익률
+        self.stop_loss = stop_loss    # 당일 추정수익률이 -이 값 밑이면 손절·관망
         self._realized = 0.0          # 청산으로 확정된 누적 수익(슬롯비중 가중)
-        self._done = False            # 목표 달성 래치 → 그날 관망
+        self._done = False            # 목표 달성/손절 래치 → 그날 관망
 
     def weights(self, closes, volumes, open_px):
         if self._done:
@@ -666,7 +673,8 @@ class Bita(Titan):
         unreal = sum(slot_w * (float(last[t]) / self._entry[t] - 1.0)
                      for t in self._held
                      if t in last.index and pd.notna(last[t]) and t in self._entry)
-        if self._realized + unreal >= self.target:
+        est = self._realized + unreal
+        if est >= self.target or est <= -self.stop_loss:   # 목표 달성 또는 -3% 손절 → 청산·관망
             self._done = True
             return self._flatten() if self._held else {}
         # 목표 미달 → Titan 로직 그대로. 단 이번 호출에서 청산된 종목의 손익을 실현분에 누적.
