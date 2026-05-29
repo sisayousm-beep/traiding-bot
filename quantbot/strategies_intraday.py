@@ -262,9 +262,11 @@ class Claude(IntradayStrategy):
         if not avail or closes.shape[0] < self.slope_win + 1:
             return {}
         last = closes.iloc[-1][avail]
-        pv = (closes[avail] * volumes[avail]).cumsum()
-        vv = volumes[avail].cumsum().replace(0, pd.NA)
-        vwap = (pv / vv).iloc[-1]
+        # 세션 누적 VWAP = Σ(가격·거래량)/Σ거래량. 마지막 누적값만 필요하므로
+        # 전체 cumsum DataFrame을 만들지 않고 합계로 바로 구한다(결과 동일, 연산 경량).
+        pv = (closes[avail] * volumes[avail]).sum()
+        vv = volumes[avail].sum().replace(0, pd.NA)
+        vwap = pv / vv
         ret_open = last / open_px[avail] - 1.0
         prev = closes.iloc[-(self.slope_win + 1)][avail]
         slope = last / prev - 1.0
@@ -396,9 +398,11 @@ class Opus(IntradayStrategy):
             return {}
 
         last = closes.iloc[-1][avail]
-        pv = (closes[avail] * volumes[avail]).cumsum()
-        vv = volumes[avail].cumsum().replace(0, pd.NA)
-        vwap = (pv / vv).iloc[-1]
+        # 세션 누적 VWAP = Σ(가격·거래량)/Σ거래량. 마지막 누적값만 필요하므로
+        # 전체 cumsum DataFrame을 만들지 않고 합계로 바로 구한다(결과 동일, 연산 경량).
+        pv = (closes[avail] * volumes[avail]).sum()
+        vv = volumes[avail].sum().replace(0, pd.NA)
+        vwap = pv / vv
         ret_open = last / open_px[avail] - 1.0
         market_ret = float(ret_open.mean())          # 등가중 시장(=평가 기준선) 당일 수익
         rs = ret_open - market_ret                    # 상대강도(시장 대비 초과) = 알파의 원천
@@ -532,9 +536,11 @@ class Gemini(IntradayStrategy):
             return {}
 
         last = closes.iloc[-1][avail]
-        pv = (closes[avail] * volumes[avail]).cumsum()
-        vv = volumes[avail].cumsum().replace(0, pd.NA)
-        vwap = (pv / vv).iloc[-1]
+        # 세션 누적 VWAP = Σ(가격·거래량)/Σ거래량. 마지막 누적값만 필요하므로
+        # 전체 cumsum DataFrame을 만들지 않고 합계로 바로 구한다(결과 동일, 연산 경량).
+        pv = (closes[avail] * volumes[avail]).sum()
+        vv = volumes[avail].sum().replace(0, pd.NA)
+        vwap = pv / vv
         ret_open = last / open_px[avail] - 1.0
         index_ret = float(ret_open.mean())            # 등가중 지수(=시장) 방향 대용
         above = last > vwap
@@ -639,7 +645,8 @@ class Bita(Titan):
     되므로 실제 실현 수익률은 target보다 약간 낮게 찍힐 수 있다.)
     """
     name = "Bita"
-    tagline = "Titan 로직 + 하루 +1% 달성 시 청산·관망 (목표지향·실험·고위험)"
+    tagline = "Titan 로직(무레버리지) + 하루 +1% 달성 시 청산·관망 (목표지향·실험)"
+    leverage = 1.0                # Titan과 달리 레버리지 미사용(슬롯비중 leverage/top_n에 반영)
 
     def __init__(self, target: float = 0.01, **kw):
         super().__init__(**kw)
@@ -730,9 +737,11 @@ class Mythos(IntradayStrategy):
         if not avail or n < max(self.slope_win, self.persist_win) + 2:
             return {}
         last = closes.iloc[-1][avail]
-        pv = (closes[avail] * volumes[avail]).cumsum()
-        vv = volumes[avail].cumsum().replace(0, pd.NA)
-        vwap = (pv / vv).iloc[-1]
+        # 세션 누적 VWAP = Σ(가격·거래량)/Σ거래량. 마지막 누적값만 필요하므로
+        # 전체 cumsum DataFrame을 만들지 않고 합계로 바로 구한다(결과 동일, 연산 경량).
+        pv = (closes[avail] * volumes[avail]).sum()
+        vv = volumes[avail].sum().replace(0, pd.NA)
+        vwap = pv / vv
         ret_open = last / open_px[avail] - 1.0
         market_ret = float(ret_open.mean())
         rs = ret_open - market_ret                    # 상대강도(시장 대비 초과)
