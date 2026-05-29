@@ -453,6 +453,8 @@ def rank_bots(reports: list[dict]) -> list[dict]:
             "best_return": _clean(max(d["returns"])) if d["returns"] else None,
             "worst_return": _clean(min(d["returns"])) if d["returns"] else None,
             "win_rate_vs_market": _clean(d["beats"] / d["beat_n"]) if d["beat_n"] else None,
+            "defense_rate": _clean(sum(1 for r in d["returns"] if r > 0) / len(d["returns"]))
+                            if d["returns"] else None,
             "bankrupt_count": d["bankrupts"],
         })
     out.sort(key=lambda d: (d["avg_rank"] is None,
@@ -580,6 +582,8 @@ def score_bots(reports: list[dict]) -> list[dict]:
             "avg_alpha": _clean(avg_alpha),
             "avg_return": _clean(avg_ret),
             "avg_market_return": _clean(avg_mkt),
+            "defense_rate": _clean(sum(1 for r in d["returns"] if r > 0) / len(d["returns"]))
+                            if d["returns"] else None,
             "beat_rate": _clean(beat_rate),
             "info_ratio": _clean(info_ratio),
             "alpha_vol": _clean(std_alpha),

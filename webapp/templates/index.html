@@ -614,6 +614,7 @@ function rankTable(rep){
       <td class="${sgn(b.avg_alpha)}">${sd(b.avg_alpha)}</td>
       <td class="${sgn(b.best_return)}">${sd(b.best_return)}</td>
       <td class="${sgn(b.worst_return)}">${sd(b.worst_return)}</td>
+      <td>${b.defense_rate==null?'–':pct(b.defense_rate)}</td>
       <td>${b.win_rate_vs_market==null?'–':pct(b.win_rate_vs_market)}</td>
       <td>${b.bankrupt_count||0}</td>
       <td>${b.n_sessions}</td>
@@ -622,9 +623,9 @@ function rankTable(rep){
   }).join('');
   return head+`<div class="repcard"><table>
     <thead><tr><th>종합</th><th class="l">봇</th><th>평균순위</th><th>평균수익</th><th>기하평균</th>
-      <th>평균알파</th><th>최고일</th><th>최악일</th><th>시장초과율</th><th>청산</th><th>세션수</th><th class="l">봇별</th></tr></thead>
+      <th>평균알파</th><th>최고일</th><th>최악일</th><th>방어확률</th><th>시장초과율</th><th>청산</th><th>세션수</th><th class="l">봇별</th></tr></thead>
     <tbody>${rows}</tbody></table>
-    <div class="meta" style="margin-top:7px;">평균순위=세션별 등수의 평균(낮을수록 항상 상위) · 평균수익=산술평균 · <b>기하평균=일별수익률을 복리로 누적한 실제 일평균 성장률(변동성이 클수록 산술평균보다 낮아짐 → 실질 수익에 더 가까움)</b> · 시장초과율=시장(등가중 매수보유) 이긴 날 비율</div></div>`;
+    <div class="meta" style="margin-top:7px;">평균순위=세션별 등수의 평균(낮을수록 항상 상위) · 평균수익=산술평균 · <b>기하평균=일별수익률을 복리로 누적한 실제 일평균 성장률(변동성이 클수록 산술평균보다 낮아짐 → 실질 수익에 더 가까움)</b> · <b>방어확률=전체 세션 중 수익률 0% 초과로 마감한 비율</b> · 시장초과율=시장(등가중 매수보유) 이긴 날 비율</div></div>`;
 }
 async function runRanking(){
   const body=document.getElementById('rankBody');
@@ -668,15 +669,16 @@ function scoreTable(rep){
       <td class="${sgn(b.avg_alpha)}">${sd(b.avg_alpha)}</td>
       <td class="${sgn(b.avg_return)}">${sd(b.avg_return)}</td>
       <td class="${sgn(b.avg_market_return)}">${sd(b.avg_market_return)}</td>
+      <td>${b.defense_rate==null?'–':pct(b.defense_rate)}</td>
       <td>${b.beat_rate==null?'–':pct(b.beat_rate)}</td>
       <td>${num(b.info_ratio)}</td>
       <td>${b.n_sessions}</td></tr>`;
   }).join('');
   return head+`<div class="repcard"><table>
     <thead><tr><th>순위</th><th class="l">봇</th><th>성능점수</th><th>평균알파</th>
-      <th>평균수익</th><th>그날시장</th><th>시장승률</th><th>정보비율</th><th>세션수</th></tr></thead>
+      <th>평균수익</th><th>그날시장</th><th>방어확률</th><th>시장승률</th><th>정보비율</th><th>세션수</th></tr></thead>
     <tbody>${rows}</tbody></table>
-    <div class="meta" style="margin-top:7px;">평균알파=시장 빼고 본 실력 · 그날시장=세션 평균 시장수익 · 시장승률=시장 이긴 날 비율 · 정보비율=평균알파/알파변동(클수록 운 아닌 실력)</div></div>`;
+    <div class="meta" style="margin-top:7px;">평균알파=시장 빼고 본 실력 · 그날시장=세션 평균 시장수익 · 방어확률=수익률 0% 초과로 마감한 날 비율 · 시장승률=시장 이긴 날 비율 · 정보비율=평균알파/알파변동(클수록 운 아닌 실력)</div></div>`;
 }
 async function runScore(){
   const body=document.getElementById('scoreBody');
