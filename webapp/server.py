@@ -24,7 +24,7 @@ from quantbot.intraday_data import load_session, now_market
 from quantbot.intraday_engine import run_intraday
 from quantbot.intraday_metrics import to_payload
 from quantbot.report import (
-    bulk_reports, market_report, ranking_report, score_report,
+    bot_history_report, bulk_reports, market_report, ranking_report, score_report,
     report_to_csv, report_to_jsonl, reports_to_flat_csv, reports_to_jsonl,
 )
 from quantbot.strategies_intraday import default_bots
@@ -201,6 +201,25 @@ def api_ranking():
         except Exception as e:                       # noqa: BLE001
             traceback.print_exc()
             return jsonify({"error": f"랭킹 생성 중 오류: {e}", "status": "exception"})
+
+
+@app.route("/api/bot_history")
+def api_bot_history():
+    """봇 1개의 세션별 성적표 — markets/days로 최대 30일, 각 장의 날짜별 성적을 나열."""
+    markets = _markets_param()
+    days = _days_param()
+    bot = request.args.get("bot")
+    if not bot:
+        return jsonify({"error": "봇(bot) 파라미터가 필요합니다.", "status": "no_bot"})
+    ts = dt.datetime.now().strftime("%H:%M:%S")
+    with _lock:
+        try:
+            rep = bot_history_report(markets, bot, days=days)
+            print(f"[{ts}] 봇성적표 {bot} {markets} {days}일 → {rep['meta']['n_sessions']}세션", flush=True)
+            return jsonify(rep)
+        except Exception as e:                       # noqa: BLE001
+            traceback.print_exc()
+            return jsonify({"error": f"봇 성적표 생성 중 오류: {e}", "status": "exception"})
 
 
 @app.route("/api/score")

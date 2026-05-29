@@ -83,6 +83,13 @@
   .repgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:6px 14px;font-size:12.5px;}
   .repgrid div{display:flex;justify-content:space-between;gap:8px;border-bottom:1px solid #21262d;padding:2px 0;}
   .repgrid .k{color:var(--muted);}
+  /* 모달 안의 넓은 표는 박스를 빠져나가지 않게 가둔다(가로·세로 스크롤). */
+  .tblwrap{overflow:auto;max-height:60vh;border:1px solid var(--border);border-radius:8px;}
+  .tblwrap table{font-size:12px;}
+  .regtag{display:inline-block;font-size:10px;padding:1px 6px;border-radius:8px;font-weight:600;}
+  .sumgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:6px 14px;font-size:13px;margin-bottom:12px;}
+  .sumgrid div{display:flex;justify-content:space-between;gap:8px;border-bottom:1px solid #21262d;padding:3px 0;}
+  .sumgrid .k{color:var(--muted);}
 </style>
 </head>
 <body>
@@ -108,6 +115,7 @@
     </span>
     <button class="act" id="report">📄 보고서</button>
     <button class="act" id="ranking">🏆 종합랭킹</button>
+    <button class="act" id="hist">📈 봇 성적표</button>
     <button class="act" id="score">🎯 성능점수</button>
     <button class="act" id="refresh">갱신</button>
   </div>
@@ -171,6 +179,36 @@
   </div>
 </div>
 
+<div id="histModal" class="modal">
+  <div class="modal-box">
+    <div class="modal-head">
+      <h2 id="histTitle">📈 봇 성적표 <span class="meta">(한 봇의 날짜·장별 성적)</span></h2>
+      <span class="grow"></span>
+      <a class="act" id="histJsonl" href="#" title="이 봇의 세션별 리포트 JSONL 다운로드">⬇ JSONL</a>
+      <a class="act" id="histCsv" href="#" title="이 봇의 세션별 리포트 CSV 다운로드">⬇ CSV</a>
+      <button class="act" id="histClose">닫기 ✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="repcard">
+        <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:center;">
+          <label>봇 <select id="histBot"></select></label>
+          <div>
+            <span class="meta" style="margin-right:6px;">시장</span>
+            <label style="display:inline-flex;gap:4px;"><input type="checkbox" class="hmkt" value="kr" checked> 국장</label>
+            <label style="display:inline-flex;gap:4px;"><input type="checkbox" class="hmkt" value="us" checked> 미장</label>
+            <label style="display:inline-flex;gap:4px;"><input type="checkbox" class="hmkt" value="kr_hot"> 국장🔥</label>
+            <label style="display:inline-flex;gap:4px;"><input type="checkbox" class="hmkt" value="us_hot"> 미장🔥</label>
+          </div>
+          <label>기간(일) <input type="number" id="histDays" value="30" min="2" max="30" style="width:64px;background:var(--panel);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:5px;"></label>
+          <button class="act" id="histRun">📈 성적표 보기</button>
+        </div>
+        <div class="meta" style="margin-top:8px;">봇 하나를 골라 최대 30일간 각 장(국장/미장/급등장)의 <b>날짜별 성적</b>을 펼쳐 봅니다. 그날 시장 국면·시장수익률·그 세션 안에서의 등수·알파까지 함께 보여, 언제 잘하고 언제 무너지는지 한눈에 보입니다.</div>
+      </div>
+      <div id="histBody"></div>
+    </div>
+  </div>
+</div>
+
 <div id="scoreModal" class="modal">
   <div class="modal-box">
     <div class="modal-head">
@@ -202,7 +240,7 @@
 </div>
 
 <script>
-const COLORS={Atlas:'#58a6ff',Orion:'#e3b341','Titan-3X':'#f85149',Claude:'#ff8c42',Opus:'#bc8cff',Gemini:'#39c5cf',Bita:'#2ea043',Mythos:'#db61a2',Sol:'#8b949e'};
+const COLORS={Atlas:'#58a6ff',Orion:'#e3b341','Titan-3X':'#f85149',Claude:'#ff8c42',Opus:'#bc8cff',Gemini:'#39c5cf',Bita:'#2ea043',Lita:'#ff7b72',Mythos:'#db61a2',Sol:'#8b949e'};
 const SCOL=['#58a6ff','#3fb950','#e3b341','#bc8cff','#f85149','#39c5cf','#db61a2','#ff7b72','#a5d6ff','#ffa657','#7ee787','#d2a8ff','#f0883e','#56d4dd'];
 let DATA=null, MARKET='kr', MODE='today', autoTimer=null, countdownTimer=null, TRADEBOT=null;
 let AUTO_BUSY=false, nextRefreshAt=0;
@@ -618,14 +656,15 @@ function rankTable(rep){
       <td>${b.win_rate_vs_market==null?'–':pct(b.win_rate_vs_market)}</td>
       <td>${b.bankrupt_count||0}</td>
       <td>${b.n_sessions}</td>
-      <td class="l"><a href="/api/bulk_report?${bq}&format=jsonl" title="${b.name} 종합 JSONL 다운로드">⬇J</a>
+      <td class="l"><a href="#" onclick="openHist('${encodeURIComponent(b.name)}');return false;" title="${b.name} 날짜별 성적표 보기">📈</a>
+        <a href="/api/bulk_report?${bq}&format=jsonl" title="${b.name} 종합 JSONL 다운로드" style="margin-left:6px;">⬇J</a>
         <a href="/api/bulk_report?${bq}&format=csv" title="${b.name} 종합 CSV 다운로드" style="margin-left:6px;">⬇C</a></td></tr>`;
   }).join('');
-  return head+`<div class="repcard"><table>
+  return head+`<div class="repcard"><div class="tblwrap"><table>
     <thead><tr><th>종합</th><th class="l">봇</th><th>평균순위</th><th>평균수익</th><th>기하평균</th>
-      <th>평균알파</th><th>최고일</th><th>최악일</th><th>방어확률</th><th>시장초과율</th><th>청산</th><th>세션수</th><th class="l">봇별</th></tr></thead>
-    <tbody>${rows}</tbody></table>
-    <div class="meta" style="margin-top:7px;">평균순위=세션별 등수의 평균(낮을수록 항상 상위) · 평균수익=산술평균 · <b>기하평균=일별수익률을 복리로 누적한 실제 일평균 성장률(변동성이 클수록 산술평균보다 낮아짐 → 실질 수익에 더 가까움)</b> · <b>방어확률=전체 세션 중 수익률 0% 초과로 마감한 비율</b> · 시장초과율=시장(등가중 매수보유) 이긴 날 비율</div></div>`;
+      <th>평균알파</th><th>최고일</th><th>최악일</th><th>방어확률</th><th>시장초과율</th><th>청산</th><th>세션수</th><th class="l">성적표/다운</th></tr></thead>
+    <tbody>${rows}</tbody></table></div>
+    <div class="meta" style="margin-top:7px;">평균순위=세션별 등수의 평균(낮을수록 항상 상위) · 평균수익=산술평균 · <b>기하평균=일별수익률을 복리로 누적한 실제 일평균 성장률(변동성이 클수록 산술평균보다 낮아짐 → 실질 수익에 더 가까움)</b> · <b>방어확률=전체 세션 중 수익률 0% 초과로 마감한 비율</b> · 시장초과율=시장(등가중 매수보유) 이긴 날 비율 · 📈 성적표=그 봇의 날짜별 성적 펼쳐보기</div></div>`;
 }
 async function runRanking(){
   const body=document.getElementById('rankBody');
@@ -674,10 +713,10 @@ function scoreTable(rep){
       <td>${num(b.info_ratio)}</td>
       <td>${b.n_sessions}</td></tr>`;
   }).join('');
-  return head+`<div class="repcard"><table>
+  return head+`<div class="repcard"><div class="tblwrap"><table>
     <thead><tr><th>순위</th><th class="l">봇</th><th>성능점수</th><th>평균알파</th>
       <th>평균수익</th><th>그날시장</th><th>방어확률</th><th>시장승률</th><th>정보비율</th><th>세션수</th></tr></thead>
-    <tbody>${rows}</tbody></table>
+    <tbody>${rows}</tbody></table></div>
     <div class="meta" style="margin-top:7px;">평균알파=시장 빼고 본 실력 · 그날시장=세션 평균 시장수익 · 방어확률=수익률 0% 초과로 마감한 날 비율 · 시장승률=시장 이긴 날 비율 · 정보비율=평균알파/알파변동(클수록 운 아닌 실력)</div></div>`;
 }
 async function runScore(){
@@ -699,6 +738,85 @@ document.getElementById('score').onclick=()=>{
 document.getElementById('scoreRun').onclick=runScore;
 document.getElementById('scoreClose').onclick=()=>document.getElementById('scoreModal').classList.remove('show');
 document.getElementById('scoreModal').onclick=e=>{if(e.target.id==='scoreModal')e.target.classList.remove('show');};
+
+// ===== 📈 봇 성적표 모달 (봇 1개의 날짜·장별 성적) =====
+function histMarkets(){return [...document.querySelectorAll('.hmkt:checked')].map(c=>c.value);}
+function histDaysV(){return Math.max(2,Math.min(30,+document.getElementById('histDays').value||30));}
+function histBotV(){return document.getElementById('histBot').value;}
+function histQuery(){return `bot=${encodeURIComponent(histBotV())}&markets=${histMarkets().join(',')||'kr'}&days=${histDaysV()}`;}
+function syncHistLinks(){
+  const q=`markets=${histMarkets().join(',')||'kr'}&days=${histDaysV()}&bot=${encodeURIComponent(histBotV())}`;
+  document.getElementById('histJsonl').href=`/api/bulk_report?${q}&format=jsonl`;
+  document.getElementById('histCsv').href=`/api/bulk_report?${q}&format=csv`;
+}
+function populateHistBots(sel){
+  const names=Object.keys(COLORS);
+  const cur=sel||document.getElementById('histBot').value||names[0];
+  document.getElementById('histBot').innerHTML=names.map(n=>`<option ${n===cur?'selected':''}>${n}</option>`).join('');
+}
+function histTable(rep){
+  const sd=v=>v==null?'–':(v>=0?'+':'')+pct(v);
+  const s=rep.summary||{}, sess=rep.sessions||[], m=rep.meta;
+  const lv=m.leverage>1?` <span class="lev">${m.leverage}x</span>`:'';
+  const head=`<div class="meta" style="margin-bottom:8px;">${m.bot}${lv} · ${m.market_labels.join(', ')} · ${m.n_sessions}개 세션 (${m.date_from||'?'} ~ ${m.date_to||'?'})<br><span class="meta">${m.tagline||''}</span></div>`;
+  if(!sess.length) return head+'<div class="err">집계할 완료 세션이 없습니다. 기간을 늘리거나 다른 시장을 선택하세요.</div>';
+  const sum=`<div class="sumgrid">
+    <div><span class="k">세션수</span><b>${s.n_sessions}</b></div>
+    <div><span class="k">평균수익</span><b class="${sgn(s.avg_return)}">${sd(s.avg_return)}</b></div>
+    <div><span class="k">기하평균</span><b class="${sgn(s.geo_return)}">${s.geo_return==null?'–':sd(s.geo_return)}</b></div>
+    <div><span class="k">평균알파</span><b class="${sgn(s.avg_alpha)}">${sd(s.avg_alpha)}</b></div>
+    <div><span class="k">평균순위</span><b>${s.avg_rank==null?'–':(+s.avg_rank).toFixed(2)}</b></div>
+    <div><span class="k">방어확률</span><b>${s.defense_rate==null?'–':pct(s.defense_rate)}</b></div>
+    <div><span class="k">시장초과율</span><b>${s.beat_rate==null?'–':pct(s.beat_rate)}</b></div>
+    <div><span class="k">최고일</span><b class="pos">${sd(s.best_return)}</b></div>
+    <div><span class="k">최악일</span><b class="neg">${sd(s.worst_return)}</b></div>
+  </div>`;
+  const rows=sess.map(r=>{
+    const c=REGIME_COL[r.regime]||'#8b949e';
+    const beat=r.beat_market===true?' <span class="pos">▲</span>':r.beat_market===false?' <span class="neg">▼</span>':'';
+    return `<tr>
+      <td class="l">${r.session_date||'–'}</td>
+      <td class="l">${r.market_short||r.market||'–'}</td>
+      <td class="l"><span class="regtag" style="background:${c}22;color:${c}">${r.regime_label||'–'}</span></td>
+      <td class="${sgn(r.market_return)}">${sd(r.market_return)}</td>
+      <td>${r.rank==null?'–':'#'+r.rank+'<span class="meta">/'+r.n_bots+'</span>'}</td>
+      <td class="${sgn(r.daily_return)}"><b>${sd(r.daily_return)}</b></td>
+      <td class="${sgn(r.alpha)}">${sd(r.alpha)}${beat}</td>
+      <td class="${sgn(r.peak_gain)}">${sd(r.peak_gain)}</td>
+      <td class="${sgn(r.max_drawdown)}">${sd(r.max_drawdown)}</td>
+      <td>${r.n_trades==null?'–':r.n_trades}${r.bankrupt?' <span class="lev bust">청산</span>':''}</td></tr>`;
+  }).join('');
+  return head+sum+`<div class="repcard"><div class="tblwrap"><table>
+    <thead><tr><th class="l">날짜</th><th class="l">시장</th><th class="l">장국면</th><th>시장수익</th><th>세션등수</th><th>하루수익</th><th>알파</th><th>고점</th><th>낙폭</th><th>매매</th></tr></thead>
+    <tbody>${rows}</tbody></table></div>
+    <div class="meta" style="margin-top:7px;">세션등수=그날 그 시장에서 이 봇의 등수(/봇 수) · 알파=하루수익−그날 시장수익(▲ 시장 이김 / ▼ 짐) · 장국면 색으로 강세(초록)~약세(빨강) 구분</div></div>`;
+}
+async function runHist(){
+  const body=document.getElementById('histBody');
+  if(!histMarkets().length){body.innerHTML='<div class="err">시장을 하나 이상 선택하세요.</div>';return;}
+  syncHistLinks();
+  body.innerHTML='<div class="meta"><span class="spin"></span> 여러 날 세션 수신·시뮬레이션 중… (수십 초 걸릴 수 있어요)</div>';
+  try{
+    const r=await fetch(`/api/bot_history?${histQuery()}`);
+    const rep=await r.json();
+    if(rep.error){body.innerHTML=`<div class="err">⚠️ ${rep.error}</div>`;return;}
+    document.getElementById('histTitle').innerHTML=`📈 ${rep.meta.bot} 성적표 <span class="meta">(날짜·장별 성적)</span>`;
+    body.innerHTML=histTable(rep);
+  }catch(e){body.innerHTML=`<div class="err">오류: ${e}</div>`;}
+}
+function openHist(encName){
+  const name=encName?decodeURIComponent(encName):null;
+  document.getElementById('histModal').classList.add('show');
+  populateHistBots(name);
+  runHist();
+}
+document.getElementById('hist').onclick=()=>openHist();
+document.getElementById('histRun').onclick=runHist;
+document.getElementById('histBot').onchange=runHist;
+document.querySelectorAll('.hmkt').forEach(c=>c.onchange=syncHistLinks);
+document.getElementById('histDays').onchange=syncHistLinks;
+document.getElementById('histClose').onclick=()=>document.getElementById('histModal').classList.remove('show');
+document.getElementById('histModal').onclick=e=>{if(e.target.id==='histModal')e.target.classList.remove('show');};
 
 load(false); setupAuto();
 </script>

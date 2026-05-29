@@ -498,6 +498,80 @@ def ranking_report(markets, days: int = 30) -> dict:
     }
 
 
+def bot_history_report(markets, bot: str, days: int = 30) -> dict:
+    """한 봇의 '세션별 성적표' — 여러 시장×최대 days일의 완료 세션을 날짜·시장 순으로 나열한다.
+
+    종합 랭킹이 봇끼리의 평균이라면, 이건 봇 하나를 골라 '각 장(場)에서 며칠 며칠 어떻게
+    했는지'를 그대로 펼쳐 본다(그날 시장 국면·시장수익률·그 세션 내 등수·알파까지 함께).
+    """
+    if isinstance(markets, str):
+        markets = [markets]
+    markets = [m for m in markets if m in config.MARKETS]
+    reports = bulk_reports(markets, days=days)
+
+    rows, tagline, leverage = [], None, None
+    for rep in reports:
+        meta = rep.get("meta", {})
+        me = rep.get("market", {})
+        n_bots = len(rep.get("bots", []))
+        for b in rep.get("bots", []):
+            if b.get("name") != bot:
+                continue
+            if tagline is None:
+                tagline, leverage = b.get("tagline"), _clean(b.get("leverage"))
+            rows.append({
+                "session_date": meta.get("session_date"),
+                "market": meta.get("market"), "market_short": meta.get("market_short"),
+                "regime": me.get("regime"), "regime_label": me.get("regime_label"),
+                "market_return": _clean(me.get("market_return")),
+                "rank": b.get("rank"), "n_bots": n_bots,
+                "daily_return": _clean(b.get("daily_return")),
+                "alpha": _clean(b.get("alpha")), "beat_market": b.get("beat_market"),
+                "realized_return": _clean(b.get("realized_return")),
+                "peak_gain": _clean(b.get("peak_gain")),
+                "max_drawdown": _clean(b.get("max_drawdown")),
+                "n_trades": b.get("n_trades"), "bankrupt": b.get("bankrupt"),
+            })
+    rows.sort(key=lambda r: (str(r["session_date"]), str(r["market"])))
+
+    def avg(xs):
+        return (sum(xs) / len(xs)) if xs else None
+
+    def geomean(xs):
+        if not xs:
+            return None
+        prod = 1.0
+        for r in xs:
+            prod *= (1.0 + r)
+        return prod ** (1.0 / len(xs)) - 1.0 if prod > 0 else None
+
+    rets = [r["daily_return"] for r in rows if r["daily_return"] is not None]
+    alphas = [r["alpha"] for r in rows if r["alpha"] is not None]
+    ranks = [r["rank"] for r in rows if r["rank"] is not None]
+    beats = [r["beat_market"] for r in rows if r["beat_market"] is not None]
+    summary = {
+        "n_sessions": len(rows),
+        "avg_return": _clean(avg(rets)), "geo_return": _clean(geomean(rets)),
+        "avg_alpha": _clean(avg(alphas)), "avg_rank": _clean(avg(ranks)),
+        "best_return": _clean(max(rets)) if rets else None,
+        "worst_return": _clean(min(rets)) if rets else None,
+        "defense_rate": _clean(sum(1 for r in rets if r > 0) / len(rets)) if rets else None,
+        "beat_rate": _clean(sum(1 for x in beats if x) / len(beats)) if beats else None,
+        "bankrupt_count": sum(1 for r in rows if r["bankrupt"]),
+    }
+    return {
+        "meta": {
+            "bot": bot, "tagline": tagline, "leverage": leverage,
+            "markets": markets, "market_labels": [config.MARKETS[m]["short"] for m in markets],
+            "days": days, "n_sessions": len(rows),
+            "date_from": rows[0]["session_date"] if rows else None,
+            "date_to": rows[-1]["session_date"] if rows else None,
+        },
+        "summary": summary,
+        "sessions": rows,
+    }
+
+
 # ===== 시장 보정 성능점수(=실력 점수) =====
 # 성격이 다른 두 그룹을 따로 평가: 우량주(일반) vs 급등주(🔥).
 SCORE_GROUPS = {
