@@ -106,7 +106,8 @@ class Titan(IntradayStrategy):
                  enter_breadth: float = 0.60, exit_breadth: float = 0.45,
                  index_up: float = 0.002, index_collapse: float = -0.002,
                  hard_stop: float = 0.02, trail_trigger: float = 0.03,
-                 trail_stop: float = 0.02, cooldown: int = 15):
+                 trail_stop: float = 0.02, cooldown: int = 15,
+                 halt_after: int = 30):
         self.top_n = top_n
         self.scan = scan
         self.enter_breadth = enter_breadth   # 3배 진입 허용 시장 폭(상단)
@@ -117,6 +118,7 @@ class Titan(IntradayStrategy):
         self.trail_trigger = trail_trigger   # 이 이익 넘기면 추격손절 전환
         self.trail_stop = trail_stop         # 고점 대비 추격손절 폭
         self.cooldown = cooldown
+        self.halt_after = halt_after         # 이 분(봉) 전에는 관망 래치 금지(개장 노이즈 유예)
         self._held: set[str] = set()
         self._entry: dict[str, float] = {}
         self._peak: dict[str, float] = {}
@@ -166,10 +168,13 @@ class Titan(IntradayStrategy):
         desired = list(survivors)
         if (n - self._last_scan) >= self.scan:
             self._last_scan = n
-            if breadth < self.exit_breadth or index_ret < self.index_collapse:
-                self._halt = True                     # 강세 붕괴 → 그날 관망(중반 급락 차단)
+            collapse = breadth < self.exit_breadth or index_ret < self.index_collapse
+            if collapse and n >= self.halt_after:
+                # 강세 붕괴 → 그날 관망(중반 급락 차단). 단 개장 노이즈 구간(halt_after 전)에는
+                # 래치하지 않는다 — 안 그러면 'V자 반등'장에서 개장 직후 출렁임에 종일 무거래가 된다.
+                self._halt = True
                 desired = []
-            elif breadth >= self.enter_breadth and index_ret > self.index_up:
+            elif not collapse and breadth >= self.enter_breadth and index_ret > self.index_up:
                 free = self.top_n - len(desired)
                 if free > 0:
                     mom = ret_open[ret_open > 0].sort_values(ascending=False)
