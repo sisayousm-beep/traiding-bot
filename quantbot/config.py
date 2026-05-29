@@ -38,6 +38,28 @@ US_UNIVERSE = [
     "CSCO", "NFLX", "SHOP", "UBER", "AMAT",
 ]
 
+# --- 미국 전섹터 대형주(us_all) 유니버스 — '기술주 한정' 해제, 11개 GICS 섹터 망라 ---
+# 궁극의 퀀텀 봇(Mythos)이 '그 많은 종목 중 최적 상황'을 횡단면으로 고르는 넓은 풀.
+# 섹터를 고루 담아야 종목선정 로직이 진짜 분산·저상관 기회를 찾을 수 있다(방어 우선).
+US_ALL_UNIVERSE = [
+    # 정보기술
+    "AAPL", "MSFT", "NVDA", "AVGO", "AMD", "CRM", "ORCL", "ADBE", "CSCO", "TXN", "QCOM", "ACN",
+    # 커뮤니케이션
+    "GOOGL", "META", "NFLX", "DIS", "CMCSA", "VZ",
+    # 임의소비재
+    "AMZN", "TSLA", "HD", "NKE", "MCD", "LOW", "SBUX",
+    # 필수소비재
+    "PG", "KO", "PEP", "COST", "WMT", "PM",
+    # 금융
+    "JPM", "BAC", "WFC", "GS", "MS", "C", "BLK", "SCHW", "V", "MA", "AXP",
+    # 헬스케어
+    "UNH", "JNJ", "LLY", "PFE", "MRK", "ABBV", "TMO", "ABT",
+    # 산업재
+    "CAT", "BA", "HON", "GE", "UPS", "RTX", "DE",
+    # 에너지·소재·유틸리티
+    "XOM", "CVX", "COP", "LIN", "NEE",
+]
+
 # --- 국내 기술주(국장) 유니버스 (KOSPI .KS / KOSDAQ .KQ) ---
 KR_UNIVERSE = [
     "005930.KS",  # 삼성전자
@@ -126,6 +148,12 @@ MARKETS = {
         "label": "미국 급등주 (미장 🔥)", "short": "미장🔥",
         "tz": "America/New_York", "open": (9, 30), "close": (16, 0),
         "universe": US_HOT_UNIVERSE, "capital": 10_000.0, "currency": "$",
+        "open_kst": "22:30", "close_kst": "05:00",
+    },
+    "us_all": {
+        "label": "미국 전섹터 대형주 (미장 ALL)", "short": "미장ALL",
+        "tz": "America/New_York", "open": (9, 30), "close": (16, 0),
+        "universe": US_ALL_UNIVERSE, "capital": 10_000.0, "currency": "$",
         "open_kst": "22:30", "close_kst": "05:00",
     },
     "kr_hot": {

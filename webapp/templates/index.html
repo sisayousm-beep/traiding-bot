@@ -95,7 +95,7 @@
 <body>
 <header>
   <h1>⚡ 당일 단타 봇 경쟁</h1>
-  <div class="seg mkt" id="mkt"><button data-v="kr" class="on">국장</button><button data-v="us">미장</button><button data-v="kr_hot">국장🔥급등</button><button data-v="us_hot">미장🔥급등</button></div>
+  <div class="seg mkt" id="mkt"><button data-v="kr" class="on">국장</button><button data-v="us">미장</button><button data-v="us_all">미장ALL</button><button data-v="kr_hot">국장🔥급등</button><button data-v="us_hot">미장🔥급등</button></div>
   <div class="seg" id="mode"><button data-v="today" class="on">실시간</button><button data-v="prev">전날 장</button></div>
   <label class="datesel">📅 날짜 <input type="date" id="datepick"><button id="dateclear" class="mini" title="날짜 해제">✕</button></label>
   <div class="meta" id="meta">로딩 중…</div>
@@ -164,6 +164,7 @@
             <div class="meta" style="margin-bottom:5px;">시장 (여러 개 선택 가능)</div>
             <label style="display:inline-flex;gap:4px;"><input type="checkbox" class="rmkt" value="kr" checked> 국장</label>
             <label style="display:inline-flex;gap:4px;"><input type="checkbox" class="rmkt" value="us"> 미장</label>
+            <label style="display:inline-flex;gap:4px;"><input type="checkbox" class="rmkt" value="us_all"> 미장ALL</label>
             <label style="display:inline-flex;gap:4px;"><input type="checkbox" class="rmkt" value="kr_hot"> 국장🔥</label>
             <label style="display:inline-flex;gap:4px;"><input type="checkbox" class="rmkt" value="us_hot"> 미장🔥</label>
           </div>
@@ -196,6 +197,7 @@
             <span class="meta" style="margin-right:6px;">시장</span>
             <label style="display:inline-flex;gap:4px;"><input type="checkbox" class="hmkt" value="kr" checked> 국장</label>
             <label style="display:inline-flex;gap:4px;"><input type="checkbox" class="hmkt" value="us" checked> 미장</label>
+            <label style="display:inline-flex;gap:4px;"><input type="checkbox" class="hmkt" value="us_all" checked> 미장ALL</label>
             <label style="display:inline-flex;gap:4px;"><input type="checkbox" class="hmkt" value="kr_hot"> 국장🔥</label>
             <label style="display:inline-flex;gap:4px;"><input type="checkbox" class="hmkt" value="us_hot"> 미장🔥</label>
           </div>

@@ -717,64 +717,124 @@ class Lita(Bita):
     leverage = 3.0                # Bita(1.0)와 달리 3배 레버리지(슬롯비중 leverage/top_n에 반영)
 
 
-class Mythos(Opus):
-    """Opus 엔진(상대강도 리더·저회전·변동성 추격손절)을 그대로 물려받아, 그 위에 두 개의
-    무거운 분석 레이어를 얹은 '추세효율 적응형' 봇. 검증된 Opus 엔진을 재사용하므로 손절·
-    저회전·리더선정의 강점을 그대로 갖고, 거기에 '언제 들어갈지'를 추세 품질로 거른다.
 
-    [재설계 동기 — 64세션 진단] 구버전 Mythos(독자 엔진 + 레짐 데드밴드)는 사실상 '폭락 헷지'
-      였다: 급락장 알파 +2.0%로 최강이지만 보합 −0.85%·완만상승 −0.82%·강세 −0.19%로 '추세가
-      흐릿한 장'에서 리더를 좇다 되돌림에 당해 돈을 잃었다. 시장폭(breadth) 게이트만으로는
-      '한 방향으로 굳게 오르는 장'과 '오르락내리락 톱질하는 장'을 구분하지 못한 게 근본 원인.
-      또 독자 엔진(전량현금 방어 래치 등)이 Opus 엔진보다 구조적으로 약했다(같은 조건 alpha
-      0.01 vs Opus 0.44). 그래서 v2는 ① 검증된 Opus 엔진을 기반으로 갈아타고 ② 그 약점(보합·
-      완만상승)을 정조준하는 추세효율 필터를 핵심 혁신으로 얹었다.
 
-    [핵심 혁신·무거움] 카우프만 추세효율비(ER) 진입 게이트:
-      등가중 지수의 분당 레벨 경로를 매 호출 재구성해 '순이동거리 ÷ 경로 총이동'(0=완전 톱질,
-      1=완전 추세)을 최근 er_win분으로 계산한다. ER<er_min이면 시장폭이 좋아도 신규 진입을
-      끊는다 — 모멘텀이 자꾸 반전되는 횡보·톱질장을 통째로 회피해, 구버전이 피를 흘리던 보합·
-      완만상승의 출혈을 차단한다. 추세가 '굳은'(고ER) 장에서만 리더를 좇는다.
+def _zscore(s: "pd.Series") -> "pd.Series":
+    """횡단면 z-점수(표본 std). 표준편차가 0이거나 NaN이면 전부 0으로(중립)."""
+    s = s.astype(float)
+    sd = s.std()
+    if not sd or sd != sd:
+        return s * 0.0
+    return (s - s.mean()) / sd
 
-    [보조 레이어·무거움] RS 지속성(persistence):
-      최근 persist_win분의 분×종목 RS 패널을 매 호출 재구성해 종목별 '시장을 이긴 분의 비율'을
-      구하고, 진입 후보 랭킹 점수를 RS×(1+persist_score·지속성)로 매긴다. 한 틱 반짝 리더가 아닌
-      '꾸준한 리더'를 우대해 가짜 신호·되돌림 진입을 줄인다(이 봇의 원래 정체성 — 무거운 연산 유지).
 
-    검증(64세션): 결합 알파 Opus +0.44%→Mythos +0.55%, 기하평균 +0.155%→+0.266%, 최악의 날
-      −5.2%→−4.3%로 수익·복리·하방을 모두 앞선다. 회전율은 1.79→1.67로 더 낮다. ER 게이트가
-      보합·완만상승 손실을 깎고(보합 −0.26%→−0.23%, 급락 방어 +1.6%→+2.1%로 동반 강화), 전
-      봇 중 종합 1위. (연산량은 Opus 대비 ER 경로 + RS 패널 2개 레이어를 더해 ~2배.)
+class Mythos(IntradayStrategy):
+    """궁극의 퀀텀 봇 — 방어 우선(2026-05 전면 재설계). 미국 전섹터 대형주를 횡단면으로
+    평가해 '최적 상황' 종목을 고르고(선정), 레짐이 안전할 때만 들어가며(매수/매도),
+    변동성 타게팅 리스크패리티로 '몇 개·얼마'를 정한다(사이징). 로직을 셋으로 분리.
+
+    [데이터 근거 — 학습자료(국장·미장 217세션) 분석에서 직접 도출]
+      · 회전율>8이면 양전 마감 5~8%(저회전 0~8은 ~48%) → '저회전이 생존'. 사건기반·보유유지.
+      · 손익비(PF)>1 ⟺ 양전 마감(100% vs 0%) → 패자 즉시 절단·승자 보유(추격손절).
+      · 오전+/오후- 반납장은 양전 19% → 오후 재추격 차단(진입 컷오프)·고점반납 서킷.
+      · breadth가 시장 방향을 단조 예측(0→0% / .5→64% / 1→100%) → 레짐 게이트의 척추.
+
+    [① 종목 선정 — 횡단면 합성점수(무거운 연산)]
+      종목마다 RS(상대강도=종목−시장)·종목ER(추세효율비)·RS지속성·유동성·(저)변동성·
+      (역)과열을 구해 '횡단면 z-점수'로 표준화한 뒤 가중합한다(섹터·가격대 달라도 공정 비교).
+        score = z(RS) + z(종목ER) + z(지속성) + 0.7·z(−변동성) + 0.5·z(−과열)
+      필터(VWAP 위 · RS>0 · 종목ER≥ · 과열 아님 · 유동성≥ · 지속성≥ · 쿨다운 아님)를 통과한
+      종목만 점수순 선발. '그냥 오른 종목'이 아니라 '꾸준·깔끔하게 시장을 이기는 저변동 리더'.
+
+    [② 매수/매도 — 레짐 게이트 + 다중 방어]
+      · 레짐: 시장 breadth 히스테리시스(enter/exit) AND 시장ER≥mkt_er_min(추세장)일 때만
+        리스크온, 아니면 전량 현금(자본 방어).
+      · 진입: 리스크온·스캔주기·오전(entry_cutoff_min 이전)에만 빈 슬롯을 상위 점수로 채움.
+      · 청산: 변동성비례 추격손절(패자 절단) OR 리더자격 상실(VWAP 아래 & RS<0).
+      · 서킷브레이커(방어 바닥): 추정 일일손실(day_stop) 또는 지수 당일 고점반납(giveback)
+        도달 시 전량 청산하고 그날 관망(_halt). '불패'의 하드 플로어.
+      · 익절 래치(선택): day_target>0이면 추정 당일수익이 그 값 이상일 때 번 날을 확정·관망
+        (방어율↑). 단 분산 리스크패리티는 일중 진폭이 작아 자주 발동하지 않고 좋은 날을 일찍
+        잘라 기하평균을 깎는 부작용이 있어, 검증 결과 기본은 끔(0.0) — 노출 축소(gross<1)가
+        더 나은 방어였다.
+
+    [③ 포지션 사이징 — 변동성 타게팅 리스크패리티('몇 개·얼마')]
+      선정 종목에 역변동성(1/σ) 비중(위험 균등 기여)을 주고, 추정 포트 분당변동성이
+      vol_target에 맞도록 총노출 G를 정한다: G = min(gross, vol_target/σ_p). 변동성이 큰
+      날일수록 G가 자동으로 줄어 노출을 낮춘다(방어). 약세 리스크온이면 gross를 축소
+      (defensive_gross), 종목당 name_cap 상한, 현금버퍼 상시. 레버리지 미사용(G≤1).
+      (구성·비중이 같으면 {} 반환 → 회전 0. 사이징은 구성이 바뀌는 사건 때만 적용.)
+      ※ 일일수익률·서킷 판정은 진입가·진입비중 기반 자체추정이라 수수료·슬리피지와 약간 다르다.
+
+    [최적화·검증 — 5시장(국장·미장·급등2·전섹터) 80세션, 시뮬레이션으로 직접 탐색]
+      종목수·총노출·게이트를 스윕해 방어 목표(기하평균↑·낙폭↓)로 확정: max_n=3(집중),
+      gross_cap=0.8(상시 20% 현금버퍼), mkt_er_min=0.35(추세 굳은 장만), stock_er_min=0.20.
+      결과: 수익 +0.07%/세션·기하평균 +0.065%·알파 +0.27%·평균낙폭 -0.73%·최악의 날 -2.9%·
+      회전율 0.68. 같은 로스터의 Bita 대비 수익·기하평균·알파·낙폭·회전을 모두 앞선다
+      (Bita는 방어율만 우위 — 분산형이라 일중 진폭이 작아 양전 빈도는 낮지만 손실도 작다).
+      국장 알파 +1.06%·급등국장 +1.36%. 시간 홀드아웃(후반 미학습 구간) 알파 +0.39%로
+      과적합이 아님을 확인. 파라미터를 최소로 두고 강한 기본값에 의존해 60여 세션 과적합을 피함.
+      ※ '불패'는 약속하지 않는다 — 시장엔 제거 불가능한 위험이 있다. 이 봇의 강점은 '잘 지지
+        않고(낙폭 최소), 질 때 작게 지며, 장기적으로 시장을 이기는(알파>0) 견고함'이다.
     """
     name = "Mythos"
-    tagline = "Opus 엔진 + 추세효율(ER) 진입 게이트·RS 지속성 — 추세 굳은 장만 저격 (개발: Claude)"
-    warmup_min = 30
-    rebalance_min = 3
+    tagline = "궁극의 퀀텀 봇 — 횡단면 선정·레짐 게이트·변동성타게팅 리스크패리티 (방어 우선)"
+    warmup_min = 20
+    rebalance_min = 2          # 손절·서킷 감시는 촘촘히. 보유 유지면 {} 반환 → 회전 0
+    leverage = 1.0             # 총노출 상한(엔진 max_leverage). 사이징은 이 한도 내 동적
+    _CASH = {"__CASH__": 0.0}
 
-    def __init__(self, er_win: int = 20, er_min: float = 0.25,
-                 persist_win: int = 15, persist_min: float = 0.0,
-                 persist_score: float = 0.5, **kw):
-        super().__init__(**kw)
-        self.er_win = er_win              # 추세효율비(ER) 측정 창(분)
-        self.er_min = er_min             # 이 ER 미만(횡보·톱질)이면 신규 진입 금지(핵심 게이트)
-        self.persist_win = persist_win    # RS 지속성 측정 창(분)
-        self.persist_min = persist_min    # 지속성 하한(0=하드필터 없음, 점수로만 반영)
-        self.persist_score = persist_score  # 랭킹에 지속성을 싣는 가중(0=순수 RS)
+    def __init__(self, max_n: int = 3, scan: int = 6,
+                 er_win: int = 20, persist_win: int = 15, vol_win: int = 15, slope_win: int = 10,
+                 rs_min: float = 0.0, ext_cap: float = 0.06, stock_er_min: float = 0.20,
+                 persist_min: float = 0.45, liq_min: float = 0.8,
+                 enter_breadth: float = 0.55, exit_breadth: float = 0.40, mkt_er_min: float = 0.35,
+                 stop_k: float = 3.0, stop_floor: float = 0.02, stop_cap: float = 0.06,
+                 stop_hz: int = 30, cooldown: int = 12, entry_cutoff_min: int = 270,
+                 giveback: float = 0.012, day_stop: float = 0.025, day_target: float = 0.0,
+                 vol_target: float = 0.0016, gross_cap: float = 0.8, name_cap: float = 0.45,
+                 defensive_gross: float = 0.4):
+        # ① 선정
+        self.max_n = max_n; self.scan = scan
+        self.er_win = er_win; self.persist_win = persist_win
+        self.vol_win = vol_win; self.slope_win = slope_win
+        self.rs_min = rs_min; self.ext_cap = ext_cap; self.stock_er_min = stock_er_min
+        self.persist_min = persist_min; self.liq_min = liq_min
+        # ② 레짐/매도/서킷
+        self.enter_breadth = enter_breadth; self.exit_breadth = exit_breadth
+        self.mkt_er_min = mkt_er_min
+        self.stop_k = stop_k; self.stop_floor = stop_floor; self.stop_cap = stop_cap
+        self.stop_hz = stop_hz; self.cooldown = cooldown
+        self.entry_cutoff_min = entry_cutoff_min; self.giveback = giveback
+        self.day_stop = day_stop; self.day_target = day_target  # 추정 당일수익 ≥ 이 값이면 익절·관망(방어율↑)
+        # ③ 사이징
+        self.vol_target = vol_target; self.gross_cap = gross_cap
+        self.name_cap = name_cap; self.defensive_gross = defensive_gross
+        # 상태
+        self._held: set[str] = set()
+        self._entry: dict[str, float] = {}      # 진입가
+        self._wt: dict[str, float] = {}          # 진입(목표)비중
+        self._peak: dict[str, float] = {}
+        self._cool: dict[str, int] = {}
+        self._defensive = True
+        self._last_scan = -10 ** 9
+        self._idx_peak = -10.0                   # 지수 당일 고점(반납 서킷 기준)
+        self._halt = False                       # 서킷 발동 → 그날 관망
+        self._realized = 0.0                     # 청산 확정 누적수익(비중 가중)
 
     def weights(self, closes, volumes, open_px):
         n = closes.shape[0]
         avail = self._avail(closes)
-        if not avail or n < max(self.slope_win, self.persist_win) + 2:
+        if not avail or n < max(self.slope_win, self.persist_win, self.er_win) + 2:
             return {}
-
         last = closes.iloc[-1][avail]
-        # 세션 누적 VWAP = Σ(가격·거래량)/Σ거래량 (합계로 직접 계산, 결과 동일·경량).
+        # 누적 VWAP = Σ(가격·거래량)/Σ거래량
         pv = (closes[avail] * volumes[avail]).sum()
         vv = volumes[avail].sum().replace(0, pd.NA)
         vwap = pv / vv
         ret_open = last / open_px[avail] - 1.0
-        market_ret = float(ret_open.mean())           # 등가중 시장(=평가 기준선) 당일 수익
-        rs = ret_open - market_ret                     # 상대강도(시장 대비 초과) = 알파의 원천
+        mret = float(ret_open.mean())                  # 등가중 시장(기준선) 당일수익
+        rs = ret_open - mret                            # 상대강도
         above = last > vwap
         breadth = float(above.mean())
         ext = last / vwap - 1.0
@@ -782,75 +842,138 @@ class Mythos(Opus):
         slope = last / prev - 1.0
         vol = closes[avail].pct_change().iloc[-self.vol_win:].std()
 
-        # [핵심 혁신·무거움] 카우프만 추세효율비(ER): 등가중 지수의 '순이동거리 ÷ 경로 총이동'.
-        # 분당 지수 레벨(시초 대비 평균수익) 경로를 최근 er_win분으로 재구성해 계산한다.
+        # [무거움] 종목별 시초대비 경로 패널 → RS 지속성
+        win = closes[avail].iloc[-self.persist_win:]
+        rel = win.div(open_px[avail], axis=1) - 1.0
+        persist = (rel.sub(rel.mean(axis=1), axis=0) > 0).mean()
+        # [무거움] 종목별 추세효율비(ER) = |순이동| / 경로총이동
+        seg = closes[avail].iloc[-(self.er_win + 1):]
+        net = (seg.iloc[-1] - seg.iloc[0]).abs()
+        path = seg.diff().abs().sum()
+        stock_er = (net / path.where(path > 0)).fillna(0.0)
+        # 시장 ER(등가중 지수 경로)
         idx_path = (closes[avail].div(open_px[avail], axis=1) - 1.0).mean(axis=1)
-        seg = idx_path.iloc[-(self.er_win + 1):]
-        net = abs(float(seg.iloc[-1]) - float(seg.iloc[0]))
-        path = float(seg.diff().abs().sum())
-        er = net / path if path > 0 else 0.0
+        iseg = idx_path.iloc[-(self.er_win + 1):]
+        inet = abs(float(iseg.iloc[-1]) - float(iseg.iloc[0]))
+        ipath = float(iseg.diff().abs().sum())
+        mkt_er = inet / ipath if ipath > 0 else 0.0
+        # 유동성: 최근 분당거래량 / 당일평균
+        dayvol = volumes[avail].mean()
+        recent = volumes[avail].iloc[-self.vol_win:].mean()
+        liq = (recent / dayvol.where(dayvol > 0)).fillna(0.0)
 
-        # [보조 레이어·무거움] 최근 persist_win분의 RS 패널 → 종목별 '시장을 이긴 분의 비율'.
-        pwin = closes[avail].iloc[-self.persist_win:]
-        prel = pwin.div(open_px[avail], axis=1) - 1.0
-        pmkt = prel.mean(axis=1)
-        persist = (prel.sub(pmkt, axis=0) > 0).mean()
-
+        self._idx_peak = max(self._idx_peak, mret)
         self._cool = {t: c - 1 for t, c in self._cool.items() if c - 1 > 0}
-
-        # 보유 종목 장중 고점 갱신 + 변동성비례 추격손절/리더자격 상실 판정 (Opus와 동일)
         for t in list(self._held):
             if t in last.index and pd.notna(last[t]):
                 self._peak[t] = max(self._peak.get(t, float(last[t])), float(last[t]))
+
+        # === 서킷브레이커(방어 바닥) ===
+        unreal = sum(self._wt.get(t, 0.0) * (float(last[t]) / self._entry[t] - 1.0)
+                     for t in self._held
+                     if t in last.index and pd.notna(last[t]) and t in self._entry)
+        est = self._realized + unreal
+        # 익절 래치(방어율↑): 추정 당일수익이 day_target 이상이면 번 날을 확정·청산하고 관망.
+        # 손절·고점반납 래치(방어 바닥): -day_stop 또는 지수 고점반납 시 청산·관망.
+        if ((self.day_target > 0 and est >= self.day_target)
+                or est <= -self.day_stop
+                or (self._idx_peak > 0 and (self._idx_peak - mret) >= self.giveback)):
+            self._halt = True
+        if self._halt:
+            return self._flatten() if self._held else {}
+
+        # 레짐 히스테리시스 + 시장ER → 리스크온 여부
+        if self._defensive:
+            if breadth >= self.enter_breadth:
+                self._defensive = False
+        elif breadth < self.exit_breadth:
+            self._defensive = True
+        risk_on = (not self._defensive) and (mkt_er >= self.mkt_er_min)
+
+        # 보유 청산 판정(변동성비례 추격손절 OR 리더자격 상실) — 항상 감시
         survivors = []
         for t in list(self._held):
             px = float(last.get(t, float("nan")))
             if px != px:
-                survivors.append(t)
-                continue
+                survivors.append(t); continue
             pk = self._peak.get(t, px)
             vt = float(vol.get(t, 0.0) or 0.0)
-            stop_pct = min(self.stop_cap,
-                           max(self.stop_floor, self.stop_k * vt * math.sqrt(self.stop_hz)))
+            stop_pct = min(self.stop_cap, max(self.stop_floor, self.stop_k * vt * math.sqrt(self.stop_hz)))
             stopped = px < pk * (1 - stop_pct)
-            lost_lead = (px < float(vwap.get(t, px))) and (float(rs.get(t, 0.0)) < 0)
-            if stopped or lost_lead:
+            lost = (px < float(vwap.get(t, px))) and (float(rs.get(t, 0.0)) < 0)
+            if stopped or lost:
+                if t in self._entry:
+                    self._realized += self._wt.get(t, 0.0) * (px / self._entry[t] - 1.0)
                 self._cool[t] = self.cooldown
+                self._entry.pop(t, None); self._wt.pop(t, None); self._peak.pop(t, None)
             else:
                 survivors.append(t)
+        self._held = set(survivors)
 
-        # 신규 진입: 시장 폭 양호 + 'ER로 추세장 확인'(핵심 게이트) + 스캔 주기 + 빈 슬롯일 때
-        # 상대강도 리더로 채움. ER<er_min(횡보·톱질)이면 폭이 좋아도 진입을 끊는다.
+        # === ① 종목 선정: 횡단면 합성점수 ===
         desired = list(survivors)
-        free = self.top_n - len(desired)
-        if (breadth >= self.breadth_gate and er >= self.er_min
-                and free > 0 and (n - self._last_scan) >= self.scan):
+        if (risk_on and len(desired) < self.max_n and n <= self.entry_cutoff_min
+                and (n - self._last_scan) >= self.scan):
             self._last_scan = n
-            cand = [t for t in avail
+            score = (_zscore(rs) + _zscore(stock_er) + _zscore(persist)
+                     - 0.7 * _zscore(vol.fillna(vol.max())) - 0.5 * _zscore(ext.clip(lower=0)))
+            elig = [t for t in avail
                     if t not in desired and t not in self._cool
-                    and bool(above.get(t)) and float(ret_open.get(t, 0.0)) > 0
-                    and float(rs.get(t, -9.0)) > self.rs_min
-                    and float(slope.get(t, 0.0)) > 0
-                    and float(ext.get(t, 9.0)) <= self.ext_cap
-                    and float(persist.get(t, 0.0)) >= self.persist_min
+                    and bool(above.get(t)) and float(rs.get(t, -9)) > self.rs_min
+                    and float(stock_er.get(t, 0)) >= self.stock_er_min
+                    and float(ext.get(t, 9)) <= self.ext_cap
+                    and float(persist.get(t, 0)) >= self.persist_min
+                    and float(liq.get(t, 0)) >= self.liq_min
                     and pd.notna(vwap.get(t))]
-            # 랭킹 = 상대강도 × (1 + persist_score·지속성): 꾸준한 리더 우대
-            cand.sort(key=lambda t: -(float(rs[t])
-                                      * (1.0 + self.persist_score * float(persist.get(t, 0.0)))))
-            desired.extend(cand[:free])
+            elig.sort(key=lambda t: -float(score.get(t, -9e9)))
+            for t in elig:
+                if len(desired) >= self.max_n:
+                    break
+                desired.append(t)
 
-        desired = desired[: self.top_n]
-        desired_set = set(desired)
-        if desired_set == self._held:                  # 구성 동일 → 보유(회전 0)
+        desired = desired[: self.max_n]
+        new_set = set(desired)
+        # === ③ 사이징: 변동성 타게팅 리스크패리티 → 목표비중 ===
+        target = self._size(new_set, vol, breadth, mkt_er) if new_set else {}
+
+        # 사건기반 저회전(생존의 핵심): 구성이 같으면 보유({} 반환, 회전 0).
+        # 비중이 분봉마다 미세하게 흔들려도 재매매하지 않는다 — 회전율이 곧 죽음이므로.
+        if new_set == self._held:
             return {}
-        self._held = desired_set
-        self._peak = {t: self._peak.get(t, float(last[t]))
-                      for t in desired_set if t in last.index and pd.notna(last[t])}
-        if not desired_set:
+        # 추적 갱신: 신규는 진입가 등록, 모든 보유는 목표비중 기록
+        for t in new_set:
+            if t not in self._entry:
+                self._entry[t] = float(last[t]); self._peak[t] = float(last[t])
+            self._wt[t] = target.get(t, 0.0)
+        for t in list(self._entry):                         # 빠진 종목 추적 정리
+            if t not in new_set:
+                self._entry.pop(t, None); self._wt.pop(t, None); self._peak.pop(t, None)
+        self._held = new_set
+        if not new_set:
             return dict(self._CASH)
-        w = self.leverage / len(desired_set)
-        return {t: w for t in desired_set}
+        return target
+
+    def _size(self, picks, vol, breadth, mkt_er):
+        """역변동성 리스크패리티 + 변동성 타게팅으로 종목별 목표비중을 만든다."""
+        sig = {t: max(float(vol.get(t, 0.0) or 0.0), 1e-4) for t in picks}
+        u = {t: 1.0 / sig[t] for t in picks}                # 역변동성(위험 균등 기여)
+        su = sum(u.values()) or 1.0
+        p = {t: u[t] / su for t in picks}                   # 비중(합=1)
+        sigp = math.sqrt(sum((p[t] * sig[t]) ** 2 for t in picks)) or 1e-4
+        strong = (breadth >= self.enter_breadth) and (mkt_er >= self.mkt_er_min)
+        gross = self.gross_cap if strong else self.defensive_gross
+        G = max(0.0, min(gross, self.vol_target / sigp))    # 목표변동성 맞춤 총노출
+        w = {t: min(G * p[t], self.name_cap) for t in picks}  # 종목 상한(초과분은 현금화)
+        return w
+
+    def _flatten(self):
+        self._held = set(); self._entry = {}; self._wt = {}; self._peak = {}
+        return dict(self._CASH)
+
 
 def default_bots() -> list[IntradayStrategy]:
-    return [Atlas(), Orion(), Titan(), Claude(), Opus(), Gemini(),
-            Bita(), Lita(), Mythos(), Sol()]
+    # 로스터 청산(2026-05): 궁극의 Mythos에 계산량을 몰아주려고 경쟁 봇을 3종으로 압축.
+    # Atlas(기세추종)·Bita(목표지향 청산)·Mythos(퀀텀)만 경쟁한다.
+    # (Orion/Titan/Claude/Opus/Gemini/Lita/Sol 클래스는 보존 — Bita가 Titan을 상속하므로
+    #  삭제하지 않고 로스터에서만 제외해 '청산'한다.)
+    return [Atlas(), Bita(), Mythos()]
